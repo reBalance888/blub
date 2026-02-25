@@ -152,16 +152,27 @@ class ProductionPolicy:
 
 
 class Comprehension:
-    """Bayesian comprehension: tracks P(context | sound heard)."""
+    """Bayesian comprehension: tracks P(context | sound heard).
+    Handles both individual sounds and multi-sound sequences."""
 
     def __init__(self):
-        # {sound_idx: {ctx_key: count}}
+        # {sound_idx: {ctx_key: count}} — individual sounds
         self.counts: dict[int, dict[tuple, int]] = {}
+        # {sound_seq_tuple: {ctx_key: count}} — full sequences
+        self.seq_counts: dict[tuple, dict[tuple, int]] = {}
 
     def update(self, sound_idx: int, ctx_key: tuple):
         if sound_idx not in self.counts:
             self.counts[sound_idx] = {}
         self.counts[sound_idx][ctx_key] = self.counts[sound_idx].get(ctx_key, 0) + 1
+
+    def update_sequence(self, sound_seq: tuple[int, ...], ctx_key: tuple):
+        """Update sequence-level comprehension (enables compositionality)."""
+        if len(sound_seq) < 2:
+            return  # single sounds handled by update()
+        if sound_seq not in self.seq_counts:
+            self.seq_counts[sound_seq] = {}
+        self.seq_counts[sound_seq][ctx_key] = self.seq_counts[sound_seq].get(ctx_key, 0) + 1
 
     def best_meaning(self, sound_idx: int) -> tuple | None:
         """Return the most likely context key for a sound, or None."""
@@ -177,6 +188,20 @@ class Comprehension:
             return best_ctx
         return None
 
+    def best_seq_meaning(self, sound_seq: tuple[int, ...]) -> tuple | None:
+        """Return most likely context for a full sequence, or None."""
+        if sound_seq not in self.seq_counts:
+            return None
+        ctx_counts = self.seq_counts[sound_seq]
+        if not ctx_counts:
+            return None
+        total = sum(ctx_counts.values())
+        best_ctx = max(ctx_counts, key=ctx_counts.get)
+        confidence = ctx_counts[best_ctx] / total
+        if confidence > 0.35 and total >= 3:
+            return best_ctx
+        return None
+
     def has_rift_meaning(self, sound_idx: int) -> bool:
         """Check if this sound is associated with a rift-related context
         (dim 0 = low distance to rift, i.e. bin 0)."""
@@ -185,6 +210,16 @@ class Comprehension:
             return False
         # dim 0 is distance to nearest rift; bin 0 = very close
         return meaning[0] == 0
+
+    def has_rift_meaning_seq(self, sound_seq: tuple[int, ...]) -> bool:
+        """Check if a sound sequence is associated with rift proximity."""
+        meaning = self.best_seq_meaning(sound_seq)
+        if meaning is not None and meaning[0] == 0:
+            return True
+        # Fallback: check first sound individually
+        if sound_seq:
+            return self.has_rift_meaning(sound_seq[0])
+        return False
 
 
 class SocialAgent(BlubAgent):
@@ -205,10 +240,11 @@ class SocialAgent(BlubAgent):
         super().__init__(*args, **kwargs)
         self.ablation = ablation or {}
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
-        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.95)
+        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.97)
         self.comprehension = Comprehension()
         self.last_ctx: tuple = (0,) * 6
         self.last_sound_idx: int | None = None
+        self.last_sound_seq: tuple = ()
         self.last_credits: float = 0.0
         self.decay_counter: int = 0
 
@@ -241,22 +277,52 @@ class SocialAgent(BlubAgent):
 
         return [d0, d1, d2, d3, d4, d5]
 
+    def _sequence_length(self, ctx_key: tuple) -> int:
+        """Determine how many sounds to produce based on context complexity.
+        Simple contexts (open water) → 1 sound.
+        Rich contexts (near specific rift type + crowded + heading) → 2-3 sounds.
+        This enables compositionality: position in sequence carries meaning."""
+        complexity = 0
+        # dim 0: near rift (bin 0 = very close)
+        if ctx_key[0] == 0:
+            complexity += 1
+        # dim 2: rift type known (gold=3, silver=2, copper=1)
+        if ctx_key[2] > 0:
+            complexity += 1
+        # dim 3: crowded (high bin)
+        if ctx_key[3] >= 2:
+            complexity += 1
+        # dim 4: predator nearby
+        if ctx_key[4] >= 1:
+            complexity += 1
+        # 0-1 complexity → 1 sound, 2 → 2 sounds, 3+ → 3 sounds
+        if complexity <= 1:
+            return 1
+        if complexity == 2:
+            return 2
+        return 3
+
     def on_retired(self):
         """Turnover: reset all language state when retired by server."""
         self.reset_language()
 
     def on_sounds_heard(self, sounds_events: list):
-        """Update comprehension when sounds are received."""
+        """Update comprehension when sounds are received (individual + sequences)."""
         if not self.ablation.get("bayesian", True):
             return  # ablation: skip Bayesian comprehension
         raw = self._extract_raw(self.state)
         ctx_key = self.ctx_discoverer.get_context(raw)
 
         for event in sounds_events:
+            seq_indices = []
             for sound_name in event["sounds"]:
                 if sound_name in SOUNDS:
                     sound_idx = SOUNDS.index(sound_name)
                     self.comprehension.update(sound_idx, ctx_key)
+                    seq_indices.append(sound_idx)
+            # Also track the full sequence for compositionality
+            if len(seq_indices) >= 2:
+                self.comprehension.update_sequence(tuple(seq_indices), ctx_key)
 
     def think(self, state: dict) -> dict:
         # Extract context
@@ -293,18 +359,26 @@ class SocialAgent(BlubAgent):
 
         speak: list[str] = []
 
-        # Produce sound based on current context
-        # Always speak near rifts, 30% elsewhere
+        # Produce sounds based on current context
+        # Always speak near rifts/predators, 30% elsewhere
         near_rift = bool(state.get("nearby_rifts"))
         near_predator = bool(state.get("nearby_predators"))
 
         if near_rift or near_predator or random.random() < 0.3:
-            sound_idx = self.production.produce(ctx_key)
-            speak = [SOUNDS[sound_idx]]
-            self.last_sound_idx = sound_idx
+            # Multi-sound production: context complexity determines sequence length
+            # Rich contexts (rift type, crowded, heading) → 2-3 sounds for compositionality
+            seq_len = self._sequence_length(ctx_key)
+            sound_indices = []
+            for _ in range(seq_len):
+                idx = self.production.produce(ctx_key)
+                sound_indices.append(idx)
+            speak = [SOUNDS[i] for i in sound_indices]
+            self.last_sound_idx = sound_indices[0]  # primary sound for reinforcement
+            self.last_sound_seq = tuple(sound_indices)
             self.last_ctx = ctx_key
         else:
             self.last_sound_idx = None
+            self.last_sound_seq = ()
             self.last_ctx = ctx_key
 
         # Movement: flee predators > respond to heard rift sounds > go to rift > wander
@@ -314,26 +388,32 @@ class SocialAgent(BlubAgent):
             move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
             return {"move": move, "speak": speak, "act": None}
 
-        # If heard a sound that means "near rift" — go toward the speaker
+        # If heard sounds that mean "near rift" — go toward the speaker
+        # Check sequences first (more specific), then individual sounds
         for event in state.get("sounds_heard", []):
-            for sound_name in event["sounds"]:
-                if sound_name in SOUNDS:
-                    sidx = SOUNDS.index(sound_name)
-                    if self.comprehension.has_rift_meaning(sidx):
-                        for lob in state.get("nearby_lobsters", []):
-                            if lob["id"] == event["from"]:
-                                dx, dy = lob["relative"]
-                                if dx > 0:
-                                    move = "east"
-                                elif dx < 0:
-                                    move = "west"
-                                elif dy > 0:
-                                    move = "south"
-                                elif dy < 0:
-                                    move = "north"
-                                else:
-                                    move = "stay"
-                                return {"move": move, "speak": speak, "act": None}
+            seq_indices = tuple(
+                SOUNDS.index(s) for s in event["sounds"] if s in SOUNDS
+            )
+            is_rift = False
+            if len(seq_indices) >= 2:
+                is_rift = self.comprehension.has_rift_meaning_seq(seq_indices)
+            if not is_rift and seq_indices:
+                is_rift = self.comprehension.has_rift_meaning(seq_indices[0])
+            if is_rift:
+                for lob in state.get("nearby_lobsters", []):
+                    if lob["id"] == event["from"]:
+                        dx, dy = lob["relative"]
+                        if dx > 0:
+                            move = "east"
+                        elif dx < 0:
+                            move = "west"
+                        elif dy > 0:
+                            move = "south"
+                        elif dy < 0:
+                            move = "north"
+                        else:
+                            move = "stay"
+                        return {"move": move, "speak": speak, "act": None}
 
         # Move toward nearest rift
         rifts = state.get("nearby_rifts", [])
@@ -358,10 +438,11 @@ class SocialAgent(BlubAgent):
     def reset_language(self):
         """Reset all learned language state (for turnover/rebirth as naive)."""
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
-        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.95)
+        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.97)
         self.comprehension = Comprehension()
         self.last_ctx = (0,) * 6
         self.last_sound_idx = None
+        self.last_sound_seq = ()
         self.last_credits = 0.0
         self.decay_counter = 0
         print(f"[{self.name}] Language state RESET (turnover rebirth)")
