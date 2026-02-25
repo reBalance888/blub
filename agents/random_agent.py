@@ -14,7 +14,7 @@ class RandomAgent(BlubAgent):
         move = random.choice(["north", "south", "east", "west", "stay"])
         speak = (
             random.sample(SOUNDS, random.randint(1, 2))
-            if random.random() > 0.7
+            if random.random() < 0.5
             else []
         )
         return {"move": move, "speak": speak, "act": None}

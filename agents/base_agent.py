@@ -85,6 +85,8 @@ class BlubAgent:
         while True:
             try:
                 state = await self.get_state()
+                if self.name == "random_0":
+                    print(f"[DEBUG] tick={state.get('tick', 'MISSING')} alive={state.get('alive', 'MISSING')} keys={list(state.keys())}", flush=True)
 
                 if not state.get("alive", True):
                     await asyncio.sleep(1)
@@ -97,6 +99,10 @@ class BlubAgent:
                 # Think and act
                 action = self.think(state)
                 await self.do_action(**action)
+
+                # Telemetry every 50 ticks
+                if state.get("tick", 0) % 50 == 0:
+                    print(f"[{self.name}] tick={state.get('tick')} credits={state.get('my_net_credits', '?')} pos={state.get('my_position', '?')}")
 
             except aiohttp.ClientError as e:
                 print(f"[{self.name}] Connection error: {e}")

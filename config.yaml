@@ -3,18 +3,20 @@
 ocean:
   size: 100
   tick_interval: 1.0
+  density_constant: 7
+  active_zone_min: 15
 
 rifts:
-  count_per_epoch: 20
+  count_per_epoch: 8
   base_richness: 5000
   depletion_per_tick_per_lobster: 0.02
   radius: 3
   respawn_interval: 50
 
 predators:
-  base_spawn_rate: 0.005
+  base_spawn_rate: 0.002
   density_exponent: 1.5
-  kill_radius: 2
+  kill_radius: 1
   speed: 1.5
   lifetime: 20
   zone_size: 10

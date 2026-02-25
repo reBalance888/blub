@@ -24,6 +24,10 @@
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
+// --- Agent type tags ---
+const TYPE_TAG = { social: '(S)', greedy: '(G)', random: '(R)' };
+const TYPE_COLOR = { social: '#7fdbca', greedy: '#ffd700', random: '#8395a7' };
+
 // --- Colors ---
 const COLORS = {
   bg: '#0a1628',
@@ -148,6 +152,32 @@ function App() {
       ctx.moveTo(0, i * CELL);
       ctx.lineTo(W, i * CELL);
       ctx.stroke();
+    }
+
+    // Active zone boundary
+    if (state.active_zone) {
+      const az = state.active_zone;
+      ctx.strokeStyle = 'rgba(0, 212, 255, 0.25)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(
+        az.min * CELL,
+        az.min * CELL,
+        az.size * CELL,
+        az.size * CELL
+      );
+      ctx.setLineDash([]);
+
+      // Dim area outside active zone
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      // Top strip
+      ctx.fillRect(0, 0, W, az.min * CELL);
+      // Bottom strip
+      ctx.fillRect(0, (az.max + 1) * CELL, W, H - (az.max + 1) * CELL);
+      // Left strip
+      ctx.fillRect(0, az.min * CELL, az.min * CELL, az.size * CELL);
+      // Right strip
+      ctx.fillRect((az.max + 1) * CELL, az.min * CELL, W - (az.max + 1) * CELL, az.size * CELL);
     }
 
     // Rifts (pulsing circles)
@@ -395,6 +425,7 @@ function App() {
 
         {/* World stats */}
         <Panel title="WORLD">
+          <Row label="Active Zone" value={state.active_zone ? `${state.active_zone.size}x${state.active_zone.size}` : '?'} color={COLORS.accent} />
           <Row label="Lobsters" value={`${s.alive_lobsters} / ${s.total_lobsters}`} />
           <Row label="Active Rifts" value={s.active_rifts} color={COLORS.rift} />
           <Row label="Predators" value={state.predators.length} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
@@ -421,7 +452,12 @@ function App() {
                 <span style={{ color: COLORS.textDim }}>#{i + 1}</span>{' '}
                 <span style={{ color: COLORS.tier[lob.tier] || COLORS.tier.shrimp }}>
                   {lob.id}
-                </span>
+                </span>{' '}
+                {lob.agent_type && (
+                  <span style={{ color: TYPE_COLOR[lob.agent_type] || COLORS.textDim, fontSize: 10 }}>
+                    {TYPE_TAG[lob.agent_type] || ''}
+                  </span>
+                )}
               </span>
               <span style={{ color: COLORS.accent }}>{lob.net_credits.toFixed(1)}</span>
             </div>

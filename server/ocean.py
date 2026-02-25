@@ -26,6 +26,8 @@ class Lobster:
     alive: bool = True
     death_timer: int = 0
     last_epoch_reward: float = 0.0
+    agent_type: str = ""  # "social", "greedy", "random", or ""
+    group_hits: int = 0  # times in group >=2 at rift this epoch
     speaking: list = field(default_factory=list)  # sounds this tick
 
 
@@ -37,6 +39,11 @@ class Ocean:
         self.size: int = config["ocean"]["size"]
         self.tick_interval: float = config["ocean"]["tick_interval"]
         self.sounds: list[str] = config["sounds"]
+
+        # Active zone parameters
+        self.density_constant: float = config["ocean"].get("density_constant", 7)
+        self.active_zone_min: int = config["ocean"].get("active_zone_min", 15)
+        self.active_zone_size: int = self.active_zone_min
 
         self.tick: int = 0
         self.lobsters: dict[str, Lobster] = {}
@@ -54,23 +61,65 @@ class Ocean:
         self.economy = EconomyManager(config)
         self.epoch_mgr = EpochManager(config)
 
-        # Init first epoch rifts
-        self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, self.size)
+        # Init first epoch rifts (within active zone)
+        zone_min, zone_max = self._active_zone_bounds()
+        self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)
+
+    # ----- Active zone -----
+
+    def _recalculate_active_zone(self):
+        """Recalculate active zone size based on connected agent count."""
+        n = len(self.lobsters)
+        if n == 0:
+            self.active_zone_size = self.active_zone_min
+        else:
+            raw = int(math.sqrt(n) * self.density_constant)
+            self.active_zone_size = max(self.active_zone_min, min(self.size, raw))
+        # Keep rift manager in sync
+        zone_min, _ = self._active_zone_bounds()
+        self.rift_mgr.update_zone(zone_min, self.active_zone_size)
+
+    def _active_zone_bounds(self) -> tuple[int, int]:
+        """Return (zone_min, zone_max) — active zone centered on the map."""
+        offset = (self.size - self.active_zone_size) // 2
+        return offset, offset + self.active_zone_size - 1
+
+    def _random_pos_in_zone(self) -> tuple[int, int]:
+        """Random position within the active zone."""
+        zone_min, zone_max = self._active_zone_bounds()
+        x = random.randint(zone_min, zone_max)
+        y = random.randint(zone_min, zone_max)
+        return x, y
 
     # ----- Agent management -----
+
+    @staticmethod
+    def _extract_agent_type(name: str) -> str:
+        for prefix in ("social", "greedy", "random"):
+            if name.startswith(prefix):
+                return prefix
+        return ""
 
     def add_lobster(self, name: str) -> Lobster:
         lid = f"lobster_{self.next_lobster_id}"
         self.next_lobster_id += 1
-        x = random.randint(0, self.size - 1)
-        y = random.randint(0, self.size - 1)
         balance = self.config["economy"]["starting_balance"]
-        lob = Lobster(id=lid, name=name, x=x, y=y, balance=balance)
+        agent_type = self._extract_agent_type(name)
+        # Temporarily add to recalculate zone, then spawn inside it
+        lob = Lobster(id=lid, name=name, x=0, y=0, balance=balance, agent_type=agent_type)
         self.lobsters[lid] = lob
+        self._recalculate_active_zone()
+        x, y = self._random_pos_in_zone()
+        lob.x = x
+        lob.y = y
+        zone_min, zone_max = self._active_zone_bounds()
+        print(f"[+] {lid} ({name}) joined at ({x},{y}) | agents={len(self.lobsters)} active_zone={self.active_zone_size} [{zone_min}..{zone_max}]")
         return lob
 
     def remove_lobster(self, agent_id: str):
         self.lobsters.pop(agent_id, None)
+        self._recalculate_active_zone()
+        print(f"[-] {agent_id} left | agents={len(self.lobsters)} active_zone={self.active_zone_size}")
 
     # ----- Actions -----
 
@@ -124,14 +173,15 @@ class Ocean:
             "west": (-1, 0),
             "stay": (0, 0),
         }
+        zone_min, zone_max = self._active_zone_bounds()
         for agent_id, actions in self.pending_actions.items():
             lob = self.lobsters.get(agent_id)
             if not lob or not lob.alive:
                 continue
             move = actions.get("move", "stay")
             dx, dy = directions.get(move, (0, 0))
-            lob.x = max(0, min(self.size - 1, lob.x + dx))
-            lob.y = max(0, min(self.size - 1, lob.y + dy))
+            lob.x = max(zone_min, min(zone_max, lob.x + dx))
+            lob.y = max(zone_min, min(zone_max, lob.y + dy))
 
     def _process_sounds(self):
         sound_cost = self.config["economy"]["sound_credit_cost"]
@@ -172,6 +222,8 @@ class Ocean:
                 total_drain = rift.richness
             for lob in nearby:
                 lob.credits_earned += reward
+                if n >= 2:
+                    lob.group_hits += 1
             rift.richness -= total_drain
 
     def _process_predator_kills(self):
@@ -196,18 +248,21 @@ class Ocean:
                 lob.death_timer -= 1
                 if lob.death_timer <= 0:
                     lob.alive = True
-                    # Respawn at random position
-                    lob.x = random.randint(0, self.size - 1)
-                    lob.y = random.randint(0, self.size - 1)
+                    # Respawn within active zone
+                    lob.x, lob.y = self._random_pos_in_zone()
 
     def _end_epoch(self):
         """End of epoch: distribute rewards, reset credits, new rifts."""
+        epoch_num = self.epoch_mgr.epoch - 1
         pool = self.config["economy"]["simulated_epoch_pool"]
         total_net = sum(
             max(0, lob.credits_earned - lob.credits_spent)
             for lob in self.lobsters.values()
         )
 
+        # Collect per-agent stats BEFORE resetting
+        # {type: {credits: [], rewards: [], group_hits: []}}
+        type_stats: dict[str, dict[str, list]] = {}
         for lob in self.lobsters.values():
             net = max(0, lob.credits_earned - lob.credits_spent)
             if total_net > 0:
@@ -216,15 +271,26 @@ class Ocean:
                 reward = 0
             lob.last_epoch_reward = reward
             lob.balance += reward
-            # Reset credits for new epoch
+
+            agent_type = lob.agent_type or "unknown"
+
+            if agent_type not in type_stats:
+                type_stats[agent_type] = {"credits": [], "rewards": [], "group_hits": []}
+            type_stats[agent_type]["credits"].append(lob.credits_earned - lob.credits_spent)
+            type_stats[agent_type]["rewards"].append(reward)
+            type_stats[agent_type]["group_hits"].append(lob.group_hits)
+
+            # Reset credits and group_hits for new epoch
             lob.credits_earned = 0.0
             lob.credits_spent = 0.0
+            lob.group_hits = 0
 
-        # New rifts
-        self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, self.size)
+        # New rifts (within active zone)
+        zone_min, zone_max = self._active_zone_bounds()
+        self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)
 
         # Log epoch results
-        print(f"\n=== EPOCH {self.epoch_mgr.epoch - 1} COMPLETE ===")
+        print(f"\n=== EPOCH {epoch_num} COMPLETE ===")
         print(f"  Pool: {pool:,.0f} | Total net credits: {total_net:,.1f}")
         top = sorted(
             self.lobsters.values(),
@@ -233,6 +299,22 @@ class Ocean:
         )[:5]
         for i, lob in enumerate(top):
             print(f"  #{i+1} {lob.id} ({lob.name}): {lob.last_epoch_reward:,.0f} BLUB")
+
+        # Summary by agent type
+        print("=== EPOCH SUMMARY ===")
+        for atype in ("social", "greedy", "random"):
+            stats = type_stats.get(atype)
+            if not stats or not stats["credits"]:
+                continue
+            avg_credits = sum(stats["credits"]) / len(stats["credits"])
+            total_reward = sum(stats["rewards"])
+            total_group_hits = sum(stats["group_hits"])
+            print(
+                f"[EPOCH {epoch_num}] {atype}: "
+                f"avg_credits={avg_credits:.1f} "
+                f"total_reward={total_reward:,.0f} "
+                f"group_hits={total_group_hits}"
+            )
         print()
 
     # ----- Helpers -----
@@ -354,6 +436,7 @@ class Ocean:
             lobsters.append({
                 "id": lob.id,
                 "name": lob.name,
+                "agent_type": lob.agent_type,
                 "pos": [lob.x, lob.y],
                 "tier": self.get_tier(lob),
                 "alive": lob.alive,
@@ -387,10 +470,18 @@ class Ocean:
             default=None,
         )
 
+        zone_min, zone_max = self._active_zone_bounds()
+
         return {
             "tick": self.tick,
             "epoch": self.epoch_mgr.epoch,
             "epoch_ticks_remaining": self.epoch_mgr.ticks_remaining(),
+            "ocean_size": self.size,
+            "active_zone": {
+                "size": self.active_zone_size,
+                "min": zone_min,
+                "max": zone_max,
+            },
             "lobsters": lobsters,
             "rifts": rifts,
             "predators": predators,
@@ -418,7 +509,8 @@ class Ocean:
         remaining = self.epoch_mgr.ticks_remaining()
         print(
             f"[Tick {self.tick}] Epoch {epoch} ({remaining} left) | "
-            f"Lobsters: {alive}/{total} | Rifts: {rifts} | Predators: {preds}"
+            f"Lobsters: {alive}/{total} | Rifts: {rifts} | Predators: {preds} | "
+            f"Zone: {self.active_zone_size}"
         )
 
     def reset(self):
@@ -431,4 +523,6 @@ class Ocean:
         self.rift_mgr.reset()
         self.predator_mgr.reset()
         self.epoch_mgr.reset()
-        self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, self.size)
+        self._recalculate_active_zone()
+        zone_min, zone_max = self._active_zone_bounds()
+        self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)

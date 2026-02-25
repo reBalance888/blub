@@ -90,15 +90,28 @@ class SocialAgent(BlubAgent):
                 }
 
     def think(self, state: dict) -> dict:
+        # Log hypotheses every 100 ticks
+        if state["tick"] % 25 == 0:
+            if self.hypotheses:
+                hyp_summary = {s: f'{h["meaning"]}({h["confidence"]:.0%})' for s, h in self.hypotheses.items()}
+                print(f"[{self.name}] tick={state['tick']} Hypotheses: {hyp_summary}")
+            else:
+                top_corr = {}
+                for sound, ctxs in list(self.correlations.items())[:5]:
+                    if ctxs:
+                        best = max(ctxs, key=ctxs.get)
+                        top_corr[sound] = f"{best}:{ctxs[best]}"
+                print(f"[{self.name}] tick={state['tick']} No hypotheses yet | Top correlations: {top_corr}")
+
         speak: list[str] = []
 
-        # If near rift — say the "rift sound" to attract others
+        # If near rift — ALWAYS speak to create data for learning
         if state.get("nearby_rifts"):
             rift_sound = self._sound_for("near_rift")
             if rift_sound:
                 speak = [rift_sound]
             else:
-                # No hypothesis yet — assign a random sound
+                # No hypothesis yet — say a random sound (others will correlate it with rift)
                 speak = [random.choice(SOUNDS)]
 
         # If predator nearby — warn and flee
@@ -106,6 +119,8 @@ class SocialAgent(BlubAgent):
             danger_sound = self._sound_for("near_predator")
             if danger_sound:
                 speak = [danger_sound]
+            else:
+                speak = [random.choice(SOUNDS)]
             pred = state["nearby_predators"][0]
             dx, dy = pred["relative"]
             if dx > 0:
@@ -158,6 +173,10 @@ class SocialAgent(BlubAgent):
                 move = "stay"
         else:
             move = random.choice(["north", "south", "east", "west"])
+
+        # Speak random sound 20% of the time even without context — generates data
+        if not speak and random.random() < 0.2:
+            speak = [random.choice(SOUNDS)]
 
         return {"move": move, "speak": speak, "act": None}
 

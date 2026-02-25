@@ -23,23 +23,26 @@ class RiftManager:
         self.next_rift_id: int = 1
         self.last_respawn_tick: int = 0
 
-    def spawn_epoch_rifts(self, epoch: int, ocean_size: int):
-        """Spawn rifts for a new epoch using deterministic positions."""
+    def spawn_epoch_rifts(self, epoch: int, zone_min: int, zone_size: int):
+        """Spawn rifts for a new epoch within the active zone. Clears old rifts."""
+        self.active_rifts.clear()
+        self._zone_min = zone_min
+        self._zone_size = zone_size
         count = self.config["rifts"]["count_per_epoch"]
         base_richness = self.config["rifts"]["base_richness"]
 
         for i in range(count):
-            x, y = self._rift_position(epoch, i, ocean_size)
+            x, y = self._rift_position(epoch, i, zone_min, zone_size)
             rid = f"rift_{self.next_rift_id}"
             self.next_rift_id += 1
             self.active_rifts.append(
                 Rift(id=rid, x=x, y=y, richness=base_richness)
             )
 
-    def _rift_position(self, epoch_seed: int, rift_index: int, ocean_size: int) -> tuple[int, int]:
-        """Pseudo-random position from epoch seed."""
+    def _rift_position(self, epoch_seed: int, rift_index: int, zone_min: int, zone_size: int) -> tuple[int, int]:
+        """Pseudo-random position from epoch seed, within active zone."""
         h = int(hashlib.md5(f"{epoch_seed}:{rift_index}".encode()).hexdigest(), 16)
-        return (h % ocean_size, (h >> 16) % ocean_size)
+        return (zone_min + h % zone_size, zone_min + (h >> 16) % zone_size)
 
     def calc_group_reward(self, n: int) -> float:
         """Group bonus: how much credit each lobster earns per tick."""
@@ -57,19 +60,26 @@ class RiftManager:
             return 4.0
         return 4.0 + 0.2 * (n - 5)
 
+    def update_zone(self, zone_min: int, zone_size: int):
+        """Update cached active zone bounds (called when agents join/leave)."""
+        self._zone_min = zone_min
+        self._zone_size = zone_size
+
     def tick_rifts(self, current_tick: int):
         """Remove depleted rifts and respawn if interval elapsed."""
         self.active_rifts = [r for r in self.active_rifts if r.richness > 0]
 
         respawn_interval = self.config["rifts"]["respawn_interval"]
         if current_tick - self.last_respawn_tick >= respawn_interval:
-            # Respawn one rift if below count
+            # Respawn one rift if below count (within active zone)
             if len(self.active_rifts) < self.config["rifts"]["count_per_epoch"]:
                 rid = f"rift_{self.next_rift_id}"
                 self.next_rift_id += 1
                 import random
-                x = random.randint(0, 99)
-                y = random.randint(0, 99)
+                zm = getattr(self, '_zone_min', 0)
+                zs = getattr(self, '_zone_size', 100)
+                x = random.randint(zm, zm + zs - 1)
+                y = random.randint(zm, zm + zs - 1)
                 self.active_rifts.append(
                     Rift(id=rid, x=x, y=y, richness=self.config["rifts"]["base_richness"], spawn_tick=current_tick)
                 )

@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     global ocean, tick_task
     ocean = Ocean(CONFIG)
     tick_task = asyncio.create_task(tick_loop())
-    print(f"BLUB Ocean started | Size: {ocean.size}x{ocean.size} | Epoch length: {CONFIG['economy']['epoch_length_ticks']} ticks")
+    print(f"BLUB Ocean started | Size: {ocean.size}x{ocean.size} | Active zone: {ocean.active_zone_size} | Epoch length: {CONFIG['economy']['epoch_length_ticks']} ticks")
     yield
     tick_task.cancel()
     try:
@@ -92,10 +92,17 @@ async def tick_loop():
 async def connect_agent(body: dict):
     name = body.get("name", "unnamed")
     lob = ocean.add_lobster(name)
+    zone_min, zone_max = ocean._active_zone_bounds()
     return {
         "agent_id": lob.id,
         "starting_balance": lob.balance,
         "position": [lob.x, lob.y],
+        "ocean_size": ocean.size,
+        "active_zone": {
+            "size": ocean.active_zone_size,
+            "min": zone_min,
+            "max": zone_max,
+        },
     }
 
 
@@ -196,8 +203,10 @@ async def agent_websocket(ws: WebSocket, agent_id: str):
                 ocean.submit_action(agent_id, data["actions"])
     except WebSocketDisconnect:
         agent_connections.pop(agent_id, None)
+        ocean.remove_lobster(agent_id)
     except Exception:
         agent_connections.pop(agent_id, None)
+        ocean.remove_lobster(agent_id)
 
 
 # ----- Serve viewer -----
