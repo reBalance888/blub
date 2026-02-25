@@ -1,0 +1,82 @@
+# BLUB Ocean Configuration
+
+ocean:
+  size: 100
+  tick_interval: 1.0
+
+rifts:
+  count_per_epoch: 20
+  base_richness: 5000
+  depletion_per_tick_per_lobster: 0.02
+  radius: 3
+  respawn_interval: 50
+
+predators:
+  base_spawn_rate: 0.005
+  density_exponent: 1.5
+  kill_radius: 2
+  speed: 1.5
+  lifetime: 20
+  zone_size: 10
+
+economy:
+  total_supply: 1000000000
+  epoch_length_ticks: 600
+  simulated_epoch_pool: 500000
+  sound_credit_cost: 1
+  death_timeout: 30
+  death_credit_penalty: 0.1
+  starting_balance: 50000
+
+tiers:
+  shrimp:
+    min_hold: 0
+    vision: 5
+    sound_range: 5
+  lobster:
+    min_hold: 10000000
+    vision: 12
+    sound_range: 12
+  kraken:
+    min_hold: 50000000
+    vision: 25
+    sound_range: 25
+
+sounds:
+  - blub
+  - glorp
+  - skree
+  - klak
+  - mrrp
+  - woosh
+  - pop
+  - zzzub
+  - frrr
+  - tink
+  - bloop
+  - squee
+  - drrrn
+  - gulp
+  - hiss
+  - bonk
+  - splat
+  - chirr
+  - wub
+  - clonk
+  - fizz
+  - grumble
+  - ping
+  - splish
+  - croak
+  - zzzt
+  - plop
+  - whirr
+  - snap
+  - burble
+
+auto_balance:
+  enabled: true
+  coordination_threshold: 0.2
+  rift_radius_boost: 1.1
+  predator_rate_reduction: 0.8
+  richness_boost: 1.3

@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BLUB Ocean</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a1628;
+    color: #c8d6e5;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    height: 100vh;
+  }
+  #root { height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// --- Colors ---
+const COLORS = {
+  bg: '#0a1628',
+  ocean: '#0d1f3c',
+  grid: 'rgba(0, 212, 255, 0.04)',
+  rift: '#00d4ff',
+  riftGlow: 'rgba(0, 212, 255, 0.3)',
+  predator: '#ff4757',
+  sound: '#7fdbca',
+  dead: 'rgba(120, 120, 120, 0.5)',
+  panel: '#111d2e',
+  panelBorder: '#1a2d45',
+  text: '#c8d6e5',
+  textDim: '#576574',
+  accent: '#00d4ff',
+  gold: '#ffd700',
+  tier: {
+    shrimp: '#8395a7',
+    lobster: '#ee5a24',
+    kraken: '#a55eea',
+  },
+};
+
+// --- Main App ---
+function App() {
+  const [state, setState] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [soundLog, setSoundLog] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [floatingTexts, setFloatingTexts] = useState([]);
+  const wsRef = useRef(null);
+  const canvasRef = useRef(null);
+  const floatIdRef = useRef(0);
+
+  // WebSocket connection
+  useEffect(() => {
+    const connect = () => {
+      const ws = new WebSocket(`ws://${location.hostname}:8000/ws/viewer`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+        // Send a ping to keep alive
+        ws.send('ping');
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          setState(data);
+
+          // Add sounds to log
+          if (data.sounds && data.sounds.length > 0) {
+            setSoundLog(prev => {
+              const newEntries = data.sounds.map(s => ({
+                tick: data.tick,
+                from: s.from,
+                sounds: s.sounds,
+                key: `${data.tick}-${s.from}`,
+              }));
+              return [...newEntries, ...prev].slice(0, 50);
+            });
+
+            // Create floating texts for sounds
+            setFloatingTexts(prev => {
+              const newFloats = data.sounds.map(s => {
+                const lob = data.lobsters.find(l => l.id === s.from);
+                if (!lob) return null;
+                floatIdRef.current++;
+                return {
+                  id: floatIdRef.current,
+                  x: lob.pos[0],
+                  y: lob.pos[1],
+                  text: s.sounds.join(' '),
+                  born: Date.now(),
+                };
+              }).filter(Boolean);
+              // Remove old (> 2s)
+              const now = Date.now();
+              const alive = prev.filter(f => now - f.born < 2000);
+              return [...alive, ...newFloats];
+            });
+          }
+        } catch {}
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    };
+
+    connect();
+    return () => wsRef.current?.close();
+  }, []);
+
+  // Canvas rendering
+  useEffect(() => {
+    if (!state || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const SIZE = 100;
+    const CELL = W / SIZE;
+
+    // Clear
+    ctx.fillStyle = COLORS.ocean;
+    ctx.fillRect(0, 0, W, H);
+
+    // Grid lines (subtle)
+    ctx.strokeStyle = COLORS.grid;
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= SIZE; i += 10) {
+      ctx.beginPath();
+      ctx.moveTo(i * CELL, 0);
+      ctx.lineTo(i * CELL, H);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, i * CELL);
+      ctx.lineTo(W, i * CELL);
+      ctx.stroke();
+    }
+
+    // Rifts (pulsing circles)
+    const pulse = 0.8 + 0.2 * Math.sin(Date.now() / 500);
+    for (const rift of state.rifts) {
+      const rx = rift.pos[0] * CELL + CELL / 2;
+      const ry = rift.pos[1] * CELL + CELL / 2;
+      const baseR = 3 * CELL;
+      const r = baseR * rift.richness_pct * pulse;
+
+      // Glow
+      const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, r);
+      grad.addColorStop(0, 'rgba(0, 212, 255, 0.4)');
+      grad.addColorStop(0.5, 'rgba(0, 212, 255, 0.15)');
+      grad.addColorStop(1, 'rgba(0, 212, 255, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(rx, ry, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Core
+      ctx.fillStyle = COLORS.rift;
+      ctx.beginPath();
+      ctx.arc(rx, ry, CELL * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Predators (red triangles)
+    for (const pred of state.predators) {
+      const px = pred.pos[0] * CELL + CELL / 2;
+      const py = pred.pos[1] * CELL + CELL / 2;
+      const s = CELL * 0.8;
+
+      ctx.fillStyle = COLORS.predator;
+      ctx.beginPath();
+      ctx.moveTo(px, py - s);
+      ctx.lineTo(px - s * 0.7, py + s * 0.5);
+      ctx.lineTo(px + s * 0.7, py + s * 0.5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Glow
+      ctx.shadowColor = COLORS.predator;
+      ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // Lobsters
+    for (const lob of state.lobsters) {
+      const lx = lob.pos[0] * CELL + CELL / 2;
+      const ly = lob.pos[1] * CELL + CELL / 2;
+      const r = CELL * 0.45;
+
+      if (!lob.alive) {
+        ctx.fillStyle = COLORS.dead;
+        ctx.globalAlpha = 0.4;
+        ctx.beginPath();
+        ctx.arc(lx, ly, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        continue;
+      }
+
+      const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
+      ctx.fillStyle = tierColor;
+      ctx.beginPath();
+      ctx.arc(lx, ly, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Speaking indicator
+      if (lob.speaking && lob.speaking.length > 0) {
+        ctx.strokeStyle = COLORS.sound;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(lx, ly, r + 3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Selected highlight
+      if (selected && selected.id === lob.id) {
+        ctx.strokeStyle = COLORS.gold;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(lx, ly, r + 5, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Vision radius
+        const tier = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
+        const vision = lob.tier === 'kraken' ? 25 : lob.tier === 'lobster' ? 12 : 5;
+        ctx.strokeStyle = `${tier}44`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.arc(lx, ly, vision * CELL, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // Floating sound texts
+    const now = Date.now();
+    for (const ft of floatingTexts) {
+      const age = now - ft.born;
+      if (age > 2000) continue;
+      const alpha = 1 - age / 2000;
+      const fx = ft.x * CELL + CELL / 2;
+      const fy = ft.y * CELL - 5 - (age / 100);
+
+      ctx.fillStyle = `rgba(127, 219, 202, ${alpha})`;
+      ctx.font = '10px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText(ft.text, fx, fy);
+    }
+  }, [state, selected, floatingTexts]);
+
+  // Animation loop for floating texts
+  useEffect(() => {
+    let raf;
+    const animate = () => {
+      if (state && canvasRef.current) {
+        // Re-trigger render by updating floatingTexts age check
+        setFloatingTexts(prev => {
+          const now = Date.now();
+          return prev.filter(f => now - f.born < 2000);
+        });
+      }
+      raf = requestAnimationFrame(animate);
+    };
+    raf = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(raf);
+  }, [state]);
+
+  // Click handler
+  const handleCanvasClick = useCallback((e) => {
+    if (!state) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+    const CELL = canvas.width / 100;
+
+    let found = null;
+    let minDist = Infinity;
+    for (const lob of state.lobsters) {
+      const lx = lob.pos[0] * CELL + CELL / 2;
+      const ly = lob.pos[1] * CELL + CELL / 2;
+      const d = Math.sqrt((mx - lx) ** 2 + (my - ly) ** 2);
+      if (d < CELL * 2 && d < minDist) {
+        minDist = d;
+        found = lob;
+      }
+    }
+    setSelected(found);
+  }, [state]);
+
+  if (!state) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: COLORS.accent }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>BLUB</div>
+          <div style={{ color: COLORS.textDim }}>
+            {connected ? 'Waiting for data...' : 'Connecting to ocean...'}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const s = state.stats;
+  const topLobsters = [...state.lobsters]
+    .sort((a, b) => b.net_credits - a.net_credits)
+    .slice(0, 5);
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', gap: 0 }}>
+      {/* Left: Ocean Canvas */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <canvas
+          ref={canvasRef}
+          width={700}
+          height={700}
+          onClick={handleCanvasClick}
+          style={{
+            flex: 1,
+            width: '100%',
+            maxHeight: 'calc(100vh - 160px)',
+            cursor: 'crosshair',
+            imageRendering: 'pixelated',
+          }}
+        />
+        {/* Sound log */}
+        <div style={{
+          height: 160,
+          background: COLORS.panel,
+          borderTop: `1px solid ${COLORS.panelBorder}`,
+          overflowY: 'auto',
+          padding: '8px 12px',
+          fontSize: 12,
+        }}>
+          <div style={{ color: COLORS.textDim, marginBottom: 4, fontWeight: 'bold' }}>
+            SOUND LOG
+          </div>
+          {soundLog.map(entry => (
+            <div key={entry.key} style={{ marginBottom: 2, lineHeight: 1.4 }}>
+              <span style={{ color: COLORS.textDim }}>[{entry.tick}]</span>{' '}
+              <span style={{ color: COLORS.accent }}>{entry.from}</span>:{' '}
+              <span style={{ color: COLORS.sound }}>"{entry.sounds.join(' ')}"</span>
+            </div>
+          ))}
+          {soundLog.length === 0 && (
+            <div style={{ color: COLORS.textDim, fontStyle: 'italic' }}>No sounds yet...</div>
+          )}
+        </div>
+      </div>
+
+      {/* Right: Stats Panel */}
+      <div style={{
+        width: 280,
+        background: COLORS.panel,
+        borderLeft: `1px solid ${COLORS.panelBorder}`,
+        padding: 16,
+        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+      }}>
+        {/* Header */}
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 'bold', color: COLORS.accent, letterSpacing: 4 }}>
+            BLUB
+          </div>
+          <div style={{ color: COLORS.textDim, fontSize: 11 }}>OCEAN SIMULATION</div>
+        </div>
+
+        {/* Epoch info */}
+        <Panel title="EPOCH">
+          <Row label="Tick" value={state.tick} />
+          <Row label="Epoch" value={state.epoch} />
+          <Row label="Remaining" value={state.epoch_ticks_remaining} />
+          <Row label="Epoch Pool" value={`${(s.epoch_pool || 0).toLocaleString()} BLUB`} color={COLORS.gold} />
+        </Panel>
+
+        {/* World stats */}
+        <Panel title="WORLD">
+          <Row label="Lobsters" value={`${s.alive_lobsters} / ${s.total_lobsters}`} />
+          <Row label="Active Rifts" value={s.active_rifts} color={COLORS.rift} />
+          <Row label="Predators" value={state.predators.length} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
+          <Row label="Credits Earned" value={s.total_credits_earned?.toLocaleString()} />
+          <Row label="Credits on Sounds" value={s.total_credits_spent_on_sounds?.toLocaleString()} />
+        </Panel>
+
+        {/* Leaderboard */}
+        <Panel title="LEADERBOARD">
+          {topLobsters.map((lob, i) => (
+            <div
+              key={lob.id}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                padding: '3px 0',
+                cursor: 'pointer',
+                color: selected?.id === lob.id ? COLORS.gold : COLORS.text,
+                opacity: lob.alive ? 1 : 0.4,
+              }}
+              onClick={() => setSelected(lob)}
+            >
+              <span>
+                <span style={{ color: COLORS.textDim }}>#{i + 1}</span>{' '}
+                <span style={{ color: COLORS.tier[lob.tier] || COLORS.tier.shrimp }}>
+                  {lob.id}
+                </span>
+              </span>
+              <span style={{ color: COLORS.accent }}>{lob.net_credits.toFixed(1)}</span>
+            </div>
+          ))}
+        </Panel>
+
+        {/* Last epoch top earner */}
+        {s.last_epoch_top_earner && s.last_epoch_top_earner.id && (
+          <Panel title="LAST EPOCH WINNER">
+            <Row label="Agent" value={s.last_epoch_top_earner.id} color={COLORS.gold} />
+            <Row label="Reward" value={`${s.last_epoch_top_earner.reward.toLocaleString()} BLUB`} color={COLORS.gold} />
+          </Panel>
+        )}
+
+        {/* Selected lobster info */}
+        {selected && (
+          <Panel title={`SELECTED: ${selected.id}`}>
+            <Row label="Name" value={selected.name} />
+            <Row label="Position" value={`(${selected.pos[0]}, ${selected.pos[1]})`} />
+            <Row label="Tier" value={selected.tier} color={COLORS.tier[selected.tier]} />
+            <Row label="Net Credits" value={selected.net_credits.toFixed(2)} color={COLORS.accent} />
+            <Row label="Alive" value={selected.alive ? 'YES' : 'DEAD'} color={selected.alive ? '#2ed573' : COLORS.predator} />
+            {selected.speaking && selected.speaking.length > 0 && (
+              <Row label="Speaking" value={selected.speaking.join(' ')} color={COLORS.sound} />
+            )}
+          </Panel>
+        )}
+
+        {/* Legend */}
+        <Panel title="LEGEND">
+          <LegendItem color={COLORS.tier.shrimp} label="Shrimp (vision 5)" />
+          <LegendItem color={COLORS.tier.lobster} label="Lobster (vision 12)" />
+          <LegendItem color={COLORS.tier.kraken} label="Kraken (vision 25)" />
+          <LegendItem color={COLORS.rift} label="Rift (credits)" shape="circle" />
+          <LegendItem color={COLORS.predator} label="Predator" shape="triangle" />
+        </Panel>
+
+        {/* Connection status */}
+        <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 'auto' }}>
+          <span style={{ color: connected ? '#2ed573' : COLORS.predator }}>
+            {connected ? '\u25CF' : '\u25CB'}
+          </span>{' '}
+          {connected ? 'Connected' : 'Disconnected'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Reusable Components ---
+function Panel({ title, children }) {
+  return (
+    <div style={{
+      background: 'rgba(255,255,255,0.03)',
+      border: `1px solid ${COLORS.panelBorder}`,
+      borderRadius: 6,
+      padding: '10px 12px',
+    }}>
+      <div style={{
+        fontSize: 10,
+        fontWeight: 'bold',
+        color: COLORS.textDim,
+        marginBottom: 6,
+        letterSpacing: 1,
+      }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Row({ label, value, color }) {
+  return (
+    <div style={{
+      display: 'flex',
+      justifyContent: 'space-between',
+      fontSize: 12,
+      padding: '2px 0',
+    }}>
+      <span style={{ color: COLORS.textDim }}>{label}</span>
+      <span style={{ color: color || COLORS.text }}>{value}</span>
+    </div>
+  );
+}
+
+function LegendItem({ color, label, shape }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '1px 0' }}>
+      <span style={{
+        display: 'inline-block',
+        width: 8,
+        height: 8,
+        background: color,
+        borderRadius: shape === 'triangle' ? 0 : '50%',
+        clipPath: shape === 'triangle' ? 'polygon(50% 0%, 0% 100%, 100% 100%)' : 'none',
+      }} />
+      <span style={{ color: COLORS.textDim }}>{label}</span>
+    </div>
+  );
+}
+
+// --- Mount ---
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
