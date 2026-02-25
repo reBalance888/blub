@@ -8,6 +8,9 @@ import asyncio
 import argparse
 import sys
 import os
+from pathlib import Path
+
+import yaml
 
 # Add agents dir to path so imports work
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +21,19 @@ from greedy_agent import GreedyAgent
 from social_agent import SocialAgent
 
 
+def _load_ablation() -> dict:
+    """Load ablation flags from config.yaml."""
+    config_path = Path(__file__).parent.parent / "config.yaml"
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("ablation", {})
+    except Exception:
+        return {}
+
+
 async def main(count: int, agent_type: str, server: str):
+    ablation = _load_ablation()
     agents: list[BlubAgent] = []
 
     for i in range(count):
@@ -27,7 +42,7 @@ async def main(count: int, agent_type: str, server: str):
         elif agent_type == "greedy":
             agent = GreedyAgent(f"greedy_{i}", server)
         elif agent_type == "social":
-            agent = SocialAgent(f"social_{i}", server)
+            agent = SocialAgent(f"social_{i}", server, ablation=ablation)
         elif agent_type == "mix":
             # Mix: 20% random, 30% greedy, 50% social
             if i < count * 0.2:
@@ -35,12 +50,13 @@ async def main(count: int, agent_type: str, server: str):
             elif i < count * 0.5:
                 agent = GreedyAgent(f"greedy_{i}", server)
             else:
-                agent = SocialAgent(f"social_{i}", server)
+                agent = SocialAgent(f"social_{i}", server, ablation=ablation)
         else:
             agent = RandomAgent(f"agent_{i}", server)
         agents.append(agent)
 
     print(f"Launching {count} agents ({agent_type}) -> {server}")
+    print(f"Ablation flags: {ablation}")
     await asyncio.gather(*[a.run() for a in agents])
 
 

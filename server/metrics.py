@@ -21,8 +21,10 @@ class MetricsLogger:
         """Called each tick for each sound event with server-side context."""
         self.observations.append((tuple(sound_seq), context_key, reward))
 
-    def compute(self, tick: int, epoch: int, lobsters) -> dict:
+    def compute(self, tick: int, epoch: int, lobsters,
+                csr_heard: int = 0, csr_successes: int = 0) -> dict:
         """Compute all metrics. Called every 100 ticks."""
+        csr = round(csr_successes / csr_heard, 4) if csr_heard > 0 else 0.0
         result = {
             "tick": tick,
             "epoch": epoch,
@@ -31,6 +33,9 @@ class MetricsLogger:
             "pos_dis": self._positional_disentanglement(),
             "mutual_info": self._mutual_information(),
             "economic_delta": self._economic_delta(lobsters),
+            "csr": csr,
+            "csr_heard": csr_heard,
+            "csr_successes": csr_successes,
         }
         self.latest = result
 

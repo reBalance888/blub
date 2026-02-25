@@ -77,6 +77,21 @@ class BlubAgent:
         """
         pass
 
+    def on_retired(self):
+        """Called when the server flags this agent as retired.
+        Override in subclasses to reset learned state (turnover)."""
+        pass
+
+    async def _reconnect(self):
+        """Disconnect and reconnect as a naive agent (turnover)."""
+        old_id = self.agent_id
+        print(f"[{self.name}] Retiring {old_id}, reconnecting as naive...")
+        try:
+            data = await self.connect()
+            print(f"[{self.name}] Reborn as {self.agent_id}")
+        except Exception as e:
+            print(f"[{self.name}] Reconnect failed: {e}")
+
     async def run(self):
         """Main agent loop."""
         await self.connect()
@@ -85,6 +100,12 @@ class BlubAgent:
         while True:
             try:
                 state = await self.get_state()
+
+                # Check retirement signal from server
+                if state.get("retired", False):
+                    self.on_retired()
+                    await self._reconnect()
+                    continue
 
                 if not state.get("alive", True):
                     await asyncio.sleep(1)

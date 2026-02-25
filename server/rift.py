@@ -60,7 +60,8 @@ class RiftManager:
         return (zone_min + h % zone_size, zone_min + (h >> 16) % zone_size)
 
     def calc_group_reward(self, n: int) -> float:
-        """Group bonus: how much credit each lobster earns per tick."""
+        """Group bonus: how much credit each lobster earns per tick.
+        Sweet spot at 5; diminishing returns past that to motivate splitting."""
         if n == 0:
             return 0.0
         if n == 1:
@@ -73,7 +74,16 @@ class RiftManager:
             return 2.8
         if n == 5:
             return 4.0
-        return 4.0 + 0.2 * (n - 5)
+        # Negative marginal returns past sweet spot of 5
+        if n == 6:
+            return 3.8
+        if n == 7:
+            return 3.5
+        if n == 8:
+            return 3.2
+        if n == 9:
+            return 3.0
+        return 2.8  # 10+
 
     def update_zone(self, zone_min: int, zone_size: int):
         """Update cached active zone bounds (called when agents join/leave)."""

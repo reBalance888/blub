@@ -88,6 +88,14 @@ sounds:
   - snap
   - burble
 
+agents:
+  agent_lifetime: 3000  # ticks (~5 epochs) before retirement & naive replacement
+
+ablation:
+  turnover: true       # agent retirement/replacement
+  sound_cost: true     # credits deducted for speaking
+  bayesian: true       # Bayesian comprehension in social agents
+
 auto_balance:
   enabled: true
   coordination_threshold: 0.2

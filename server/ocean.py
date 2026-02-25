@@ -32,6 +32,8 @@ class Lobster:
     grace_ticks: int = 0  # immunity after spawn/respawn
     deaths_this_epoch: int = 0  # killed by predators count
     speaking: list = field(default_factory=list)  # sounds this tick
+    age: int = 0  # ticks since spawn (for turnover)
+    retired: bool = False  # flagged for replacement
 
 
 class Ocean:
@@ -70,6 +72,11 @@ class Ocean:
         self.epoch_mgr = EpochManager(config)
         self.metrics_logger = MetricsLogger()
         self.latest_metrics: dict = {}
+
+        # CSR tracking: {agent_id: (heard_tick, agent_x, agent_y)}
+        self._csr_pending: dict[str, tuple[int, int, int]] = {}
+        self._csr_heard_events: int = 0
+        self._csr_successes: int = 0
 
         # Init first epoch rifts (within active zone)
         zone_min, zone_max = self._active_zone_bounds()
@@ -153,10 +160,20 @@ class Ocean:
         # 3. Rift rewards (group bonus)
         self._process_rift_rewards()
 
-        # 3b. Decrement grace ticks
+        # 3b. Decrement grace ticks & increment age
+        turnover_enabled = self.config.get("ablation", {}).get("turnover", True)
+        agent_lifetime = self.config.get("agents", {}).get("agent_lifetime", 3000)
         for lob in self.lobsters.values():
             if lob.alive and lob.grace_ticks > 0:
                 lob.grace_ticks -= 1
+            lob.age += 1
+            # Turnover: mark retired agents
+            if turnover_enabled and lob.age >= agent_lifetime and not lob.retired:
+                lob.retired = True
+                print(f"[RETIRE] {lob.id} ({lob.name}) retired at tick {self.tick} (age={lob.age})")
+
+        # 3c. Track CSR: agents that heard sounds — record positions for move-toward-rift check
+        self._track_csr_heard()
 
         # 4. Predator spawns & movement
         self.predator_mgr.process_tick(self._get_lobster_positions(), self.size)
@@ -181,7 +198,8 @@ class Ocean:
         if self.tick % 100 == 0:
             self._log_stats()
             self.latest_metrics = self.metrics_logger.compute(
-                self.tick, self.epoch_mgr.epoch, self.lobsters
+                self.tick, self.epoch_mgr.epoch, self.lobsters,
+                self._csr_heard_events, self._csr_successes,
             )
 
     def _process_movements(self):
@@ -203,7 +221,8 @@ class Ocean:
             lob.y = max(zone_min, min(zone_max, lob.y + dy))
 
     def _process_sounds(self):
-        sound_cost = self.config["economy"]["sound_credit_cost"]
+        sound_cost_enabled = self.config.get("ablation", {}).get("sound_cost", True)
+        sound_cost = self.config["economy"]["sound_credit_cost"] if sound_cost_enabled else 0
         valid_sounds = set(self.sounds)
         rift_radius = self.config["rifts"]["radius"]
 
@@ -376,6 +395,47 @@ class Ocean:
             "epoch": epoch_num,
             "types": epoch_summary,
         })
+
+    # ----- CSR (Communication Success Rate) -----
+
+    def _track_csr_heard(self):
+        """Track agents that heard sounds this tick for CSR measurement.
+        Success = agent heard a sound and moved within rift radius within 10 ticks."""
+        rift_radius = self.config["rifts"]["radius"]
+
+        # Check pending CSR events for success (moved near rift within 10 ticks)
+        resolved = []
+        for agent_id, (heard_tick, hx, hy) in self._csr_pending.items():
+            if self.tick - heard_tick > 10:
+                resolved.append(agent_id)
+                continue
+            lob = self.lobsters.get(agent_id)
+            if not lob or not lob.alive:
+                resolved.append(agent_id)
+                continue
+            # Check if agent is now near any rift
+            for rift in self.rift_mgr.active_rifts:
+                if abs(lob.x - rift.x) <= rift_radius and abs(lob.y - rift.y) <= rift_radius:
+                    self._csr_successes += 1
+                    resolved.append(agent_id)
+                    break
+        for aid in resolved:
+            self._csr_pending.pop(aid, None)
+
+        # Register new heard events from this tick
+        for snd in self.current_sounds:
+            speaker_id = snd["from"]
+            sx, sy = snd["pos"]
+            for lob in self.lobsters.values():
+                if lob.id == speaker_id or not lob.alive:
+                    continue
+                tier_info = self.get_tier_info(self.get_tier(lob))
+                sound_range = tier_info["sound_range"]
+                if abs(lob.x - sx) <= sound_range and abs(lob.y - sy) <= sound_range:
+                    # This agent heard a sound — don't overwrite if already pending
+                    if lob.id not in self._csr_pending:
+                        self._csr_heard_events += 1
+                        self._csr_pending[lob.id] = (self.tick, lob.x, lob.y)
 
     # ----- Helpers -----
 
@@ -593,6 +653,7 @@ class Ocean:
             "sounds_heard": sounds_heard,
             "alive": lob.alive,
             "last_epoch_reward": round(lob.last_epoch_reward, 2),
+            "retired": lob.retired,
         }
 
     # ----- Viewer state -----
@@ -700,6 +761,9 @@ class Ocean:
         self.epoch_mgr.reset()
         self.metrics_logger.reset()
         self.latest_metrics = {}
+        self._csr_pending.clear()
+        self._csr_heard_events = 0
+        self._csr_successes = 0
         self._recalculate_active_zone()
         zone_min, zone_max = self._active_zone_bounds()
         self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)

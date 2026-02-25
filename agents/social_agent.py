@@ -10,15 +10,22 @@ from base_agent import BlubAgent, SOUNDS
 
 class ContextDiscoverer:
     """Adaptive context binning: tracks running min/max per dimension,
-    quantizes raw observation vectors into discrete context keys."""
+    quantizes raw observation vectors into discrete context keys.
+    Dynamically doubles bins for most-used dimensions (P3-A)."""
+
+    MAX_BINS = 8
+    REFINE_INTERVAL = 500  # ticks between refinement checks
 
     def __init__(self, dims: int = 6, bins: int = 4, warmup: int = 50):
         self.dims = dims
-        self.bins = bins
+        self.bins_per_dim = [bins] * dims
         self.mins = [float('inf')] * dims
         self.maxs = [float('-inf')] * dims
         self.count = 0
         self.warmup = warmup
+        # Track usage frequency per dimension (non-zero variance)
+        self._dim_usage: list[int] = [0] * dims
+        self._last_refine: int = 0
 
     def get_context(self, raw_vec: list[float]) -> tuple:
         self.count += 1
@@ -32,12 +39,35 @@ class ContextDiscoverer:
         key = []
         for i in range(self.dims):
             r = self.maxs[i] - self.mins[i]
+            b = self.bins_per_dim[i]
             if r > 0:
-                idx = min(int((raw_vec[i] - self.mins[i]) / r * self.bins), self.bins - 1)
+                idx = min(int((raw_vec[i] - self.mins[i]) / r * b), b - 1)
+                self._dim_usage[i] += 1
             else:
                 idx = 0
             key.append(idx)
+
+        # Dynamic refinement every REFINE_INTERVAL ticks
+        if self.count - self._last_refine >= self.REFINE_INTERVAL:
+            self._refine_bins()
+            self._last_refine = self.count
+
         return tuple(key)
+
+    def _refine_bins(self):
+        """Double bins for top-2 most-used dimensions (capped at MAX_BINS)."""
+        # Rank dims by usage, pick top 2 that are below cap
+        ranked = sorted(range(self.dims), key=lambda i: -self._dim_usage[i])
+        refined = 0
+        for i in ranked:
+            if refined >= 2:
+                break
+            if self.bins_per_dim[i] < self.MAX_BINS:
+                old = self.bins_per_dim[i]
+                self.bins_per_dim[i] = min(old * 2, self.MAX_BINS)
+                refined += 1
+        # Reset usage counts
+        self._dim_usage = [0] * self.dims
 
 
 class ProductionPolicy:
@@ -69,9 +99,40 @@ class ProductionPolicy:
         return self.n_sounds - 1
 
     def reinforce(self, ctx_key: tuple, sound_idx: int, reward: float):
-        """Increase weight for this context-sound pair."""
+        """Increase weight for this context-sound pair.
+        Spill-over: also reinforce Hamming-distance neighbors for generalization."""
         self._ensure(ctx_key)
         self.weights[ctx_key][sound_idx] += reward
+        # Spill-over to neighboring context bins
+        if reward > 0:
+            self._spillover(ctx_key, sound_idx, reward)
+
+    def _spillover(self, ctx_key: tuple, sound_idx: int, reward: float):
+        """Propagate reward to Hamming distance 1 (30%) and 2 (10%) neighbors."""
+        dims = len(ctx_key)
+        # Distance 1: flip one dimension by +/-1
+        for i in range(dims):
+            for delta in (-1, 1):
+                neighbor = list(ctx_key)
+                neighbor[i] = ctx_key[i] + delta
+                if neighbor[i] < 0:
+                    continue
+                nb = tuple(neighbor)
+                self._ensure(nb)
+                self.weights[nb][sound_idx] += reward * 0.3
+        # Distance 2: flip two dimensions by +/-1 each
+        for i in range(dims):
+            for j in range(i + 1, dims):
+                for di in (-1, 1):
+                    for dj in (-1, 1):
+                        neighbor = list(ctx_key)
+                        neighbor[i] = ctx_key[i] + di
+                        neighbor[j] = ctx_key[j] + dj
+                        if neighbor[i] < 0 or neighbor[j] < 0:
+                            continue
+                        nb = tuple(neighbor)
+                        self._ensure(nb)
+                        self.weights[nb][sound_idx] += reward * 0.1
 
     def decay_all(self):
         """Multiply all weights by decay factor."""
@@ -140,8 +201,9 @@ class SocialAgent(BlubAgent):
       5: heading to nearest rift (0-7 compass, 8=none)
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, ablation: dict | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.ablation = ablation or {}
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
         self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.95)
         self.comprehension = Comprehension()
@@ -179,8 +241,14 @@ class SocialAgent(BlubAgent):
 
         return [d0, d1, d2, d3, d4, d5]
 
+    def on_retired(self):
+        """Turnover: reset all language state when retired by server."""
+        self.reset_language()
+
     def on_sounds_heard(self, sounds_events: list):
         """Update comprehension when sounds are received."""
+        if not self.ablation.get("bayesian", True):
+            return  # ablation: skip Bayesian comprehension
         raw = self._extract_raw(self.state)
         ctx_key = self.ctx_discoverer.get_context(raw)
 
@@ -286,6 +354,17 @@ class SocialAgent(BlubAgent):
             move = random.choice(["north", "south", "east", "west"])
 
         return {"move": move, "speak": speak, "act": None}
+
+    def reset_language(self):
+        """Reset all learned language state (for turnover/rebirth as naive)."""
+        self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
+        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.95)
+        self.comprehension = Comprehension()
+        self.last_ctx = (0,) * 6
+        self.last_sound_idx = None
+        self.last_credits = 0.0
+        self.decay_counter = 0
+        print(f"[{self.name}] Language state RESET (turnover rebirth)")
 
 
 if __name__ == "__main__":
