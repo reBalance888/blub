@@ -14,12 +14,13 @@ rifts:
   respawn_interval: 50
 
 predators:
-  base_spawn_rate: 0.002
+  base_spawn_rate: 0.0008
   density_exponent: 1.5
   kill_radius: 1
-  speed: 1.5
-  lifetime: 20
+  speed: 1.0
+  lifetime: 30
   zone_size: 10
+  grace_period: 60
 
 economy:
   total_supply: 1000000000

@@ -85,8 +85,6 @@ class BlubAgent:
         while True:
             try:
                 state = await self.get_state()
-                if self.name == "random_0":
-                    print(f"[DEBUG] tick={state.get('tick', 'MISSING')} alive={state.get('alive', 'MISSING')} keys={list(state.keys())}", flush=True)
 
                 if not state.get("alive", True):
                     await asyncio.sleep(1)

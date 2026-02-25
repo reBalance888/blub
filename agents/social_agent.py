@@ -91,7 +91,7 @@ class SocialAgent(BlubAgent):
 
     def think(self, state: dict) -> dict:
         # Log hypotheses every 100 ticks
-        if state["tick"] % 25 == 0:
+        if state["tick"] % 100 == 0:
             if self.hypotheses:
                 hyp_summary = {s: f'{h["meaning"]}({h["confidence"]:.0%})' for s, h in self.hypotheses.items()}
                 print(f"[{self.name}] tick={state['tick']} Hypotheses: {hyp_summary}")

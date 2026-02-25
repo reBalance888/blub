@@ -248,12 +248,24 @@ function App() {
       ctx.arc(lx, ly, r, 0, Math.PI * 2);
       ctx.fill();
 
+      // Grace shield (pulsing cyan ring)
+      if (lob.grace) {
+        const gPulse = 0.4 + 0.6 * Math.abs(Math.sin(Date.now() / 300));
+        ctx.strokeStyle = `rgba(0, 212, 255, ${gPulse})`;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(lx, ly, r + 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
       // Speaking indicator
       if (lob.speaking && lob.speaking.length > 0) {
         ctx.strokeStyle = COLORS.sound;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.arc(lx, ly, r + 3, 0, Math.PI * 2);
+        ctx.arc(lx, ly, r + (lob.grace ? 7 : 3), 0, Math.PI * 2);
         ctx.stroke();
       }
 
@@ -352,7 +364,7 @@ function App() {
   const s = state.stats;
   const topLobsters = [...state.lobsters]
     .sort((a, b) => b.net_credits - a.net_credits)
-    .slice(0, 5);
+    .slice(0, 10);
 
   return (
     <div style={{ display: 'flex', height: '100vh', gap: 0 }}>
@@ -472,6 +484,70 @@ function App() {
           </Panel>
         )}
 
+        {/* Epoch History */}
+        {state.epoch_history && state.epoch_history.length > 0 && (
+          <Panel title="EPOCH HISTORY">
+            <div style={{ fontSize: 10, overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+                    <th style={{ textAlign: 'left', padding: '2px 4px', color: COLORS.textDim }}>E</th>
+                    <th style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.social }}>S</th>
+                    <th style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.greedy }}>G</th>
+                    <th style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.random }}>R</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.epoch_history.map(eh => {
+                    const s = eh.types.social;
+                    const g = eh.types.greedy;
+                    const r = eh.types.random;
+                    const maxReward = Math.max(s?.total_reward || 0, g?.total_reward || 0, r?.total_reward || 0);
+                    const fmt = (v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v;
+                    return (
+                      <tr key={eh.epoch} style={{ borderBottom: `1px solid ${COLORS.panelBorder}22` }}>
+                        <td style={{ padding: '2px 4px', color: COLORS.textDim }}>{eh.epoch}</td>
+                        <td style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.social, fontWeight: s && s.total_reward === maxReward ? 'bold' : 'normal' }}>
+                          {s ? fmt(s.total_reward) : '-'}
+                        </td>
+                        <td style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.greedy, fontWeight: g && g.total_reward === maxReward ? 'bold' : 'normal' }}>
+                          {g ? fmt(g.total_reward) : '-'}
+                        </td>
+                        <td style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.random, fontWeight: r && r.total_reward === maxReward ? 'bold' : 'normal' }}>
+                          {r ? fmt(r.total_reward) : '-'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {/* Group hits comparison for last epoch */}
+              {(() => {
+                const last = state.epoch_history[state.epoch_history.length - 1];
+                if (!last) return null;
+                const types = ['social', 'greedy', 'random'];
+                return (
+                  <div style={{ marginTop: 6, borderTop: `1px solid ${COLORS.panelBorder}`, paddingTop: 4 }}>
+                    <div style={{ color: COLORS.textDim, marginBottom: 2 }}>Last epoch details:</div>
+                    {types.map(t => {
+                      const d = last.types[t];
+                      if (!d) return null;
+                      return (
+                        <div key={t} style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
+                          <span style={{ color: TYPE_COLOR[t] }}>{t}</span>
+                          <span style={{ color: COLORS.textDim }}>
+                            grp:{d.group_hits} deaths:{d.deaths}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          </Panel>
+        )}
+
         {/* Selected lobster info */}
         {selected && (
           <Panel title={`SELECTED: ${selected.id}`}>
@@ -480,6 +556,12 @@ function App() {
             <Row label="Tier" value={selected.tier} color={COLORS.tier[selected.tier]} />
             <Row label="Net Credits" value={selected.net_credits.toFixed(2)} color={COLORS.accent} />
             <Row label="Alive" value={selected.alive ? 'YES' : 'DEAD'} color={selected.alive ? '#2ed573' : COLORS.predator} />
+            {selected.grace && (
+              <Row label="Shield" value="ACTIVE" color={COLORS.accent} />
+            )}
+            {selected.agent_type && (
+              <Row label="Type" value={selected.agent_type} color={TYPE_COLOR[selected.agent_type]} />
+            )}
             {selected.speaking && selected.speaking.length > 0 && (
               <Row label="Speaking" value={selected.speaking.join(' ')} color={COLORS.sound} />
             )}
@@ -493,6 +575,12 @@ function App() {
           <LegendItem color={COLORS.tier.kraken} label="Kraken (vision 25)" />
           <LegendItem color={COLORS.rift} label="Rift (credits)" shape="circle" />
           <LegendItem color={COLORS.predator} label="Predator" shape="triangle" />
+          <LegendItem color={COLORS.accent} label="Grace shield (immune)" shape="circle" />
+          <div style={{ marginTop: 4, borderTop: `1px solid ${COLORS.panelBorder}`, paddingTop: 4 }}>
+            <LegendItem color={TYPE_COLOR.social} label="(S) Social" />
+            <LegendItem color={TYPE_COLOR.greedy} label="(G) Greedy" />
+            <LegendItem color={TYPE_COLOR.random} label="(R) Random" />
+          </div>
         </Panel>
 
         {/* Connection status */}

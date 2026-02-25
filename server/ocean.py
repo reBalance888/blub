@@ -28,6 +28,8 @@ class Lobster:
     last_epoch_reward: float = 0.0
     agent_type: str = ""  # "social", "greedy", "random", or ""
     group_hits: int = 0  # times in group >=2 at rift this epoch
+    grace_ticks: int = 0  # immunity after spawn/respawn
+    deaths_this_epoch: int = 0  # killed by predators count
     speaking: list = field(default_factory=list)  # sounds this tick
 
 
@@ -48,6 +50,7 @@ class Ocean:
         self.tick: int = 0
         self.lobsters: dict[str, Lobster] = {}
         self.next_lobster_id: int = 1
+        self.epoch_history: list[dict] = []
 
         # Pending actions: {agent_id: action_dict}
         self.pending_actions: dict[str, dict] = {}
@@ -105,8 +108,9 @@ class Ocean:
         self.next_lobster_id += 1
         balance = self.config["economy"]["starting_balance"]
         agent_type = self._extract_agent_type(name)
+        grace = self.config["predators"].get("grace_period", 60)
         # Temporarily add to recalculate zone, then spawn inside it
-        lob = Lobster(id=lid, name=name, x=0, y=0, balance=balance, agent_type=agent_type)
+        lob = Lobster(id=lid, name=name, x=0, y=0, balance=balance, agent_type=agent_type, grace_ticks=grace)
         self.lobsters[lid] = lob
         self._recalculate_active_zone()
         x, y = self._random_pos_in_zone()
@@ -141,6 +145,11 @@ class Ocean:
 
         # 3. Rift rewards (group bonus)
         self._process_rift_rewards()
+
+        # 3b. Decrement grace ticks
+        for lob in self.lobsters.values():
+            if lob.alive and lob.grace_ticks > 0:
+                lob.grace_ticks -= 1
 
         # 4. Predator spawns & movement
         self.predator_mgr.process_tick(self._get_lobster_positions(), self.size)
@@ -233,21 +242,24 @@ class Ocean:
 
         for pred in self.predator_mgr.active_predators:
             for lob in self.lobsters.values():
-                if not lob.alive:
+                if not lob.alive or lob.grace_ticks > 0:
                     continue
                 dist = math.sqrt((lob.x - pred.x) ** 2 + (lob.y - pred.y) ** 2)
                 if dist <= kill_radius:
                     lob.alive = False
                     lob.death_timer = death_timeout
+                    lob.deaths_this_epoch += 1
                     penalty = lob.credits_earned * death_penalty
                     lob.credits_earned = max(0, lob.credits_earned - penalty)
 
     def _process_death_timers(self):
+        grace = self.config["predators"].get("grace_period", 60)
         for lob in self.lobsters.values():
             if not lob.alive:
                 lob.death_timer -= 1
                 if lob.death_timer <= 0:
                     lob.alive = True
+                    lob.grace_ticks = grace
                     # Respawn within active zone
                     lob.x, lob.y = self._random_pos_in_zone()
 
@@ -261,7 +273,7 @@ class Ocean:
         )
 
         # Collect per-agent stats BEFORE resetting
-        # {type: {credits: [], rewards: [], group_hits: []}}
+        # {type: {credits: [], rewards: [], group_hits: [], deaths: []}}
         type_stats: dict[str, dict[str, list]] = {}
         for lob in self.lobsters.values():
             net = max(0, lob.credits_earned - lob.credits_spent)
@@ -275,15 +287,17 @@ class Ocean:
             agent_type = lob.agent_type or "unknown"
 
             if agent_type not in type_stats:
-                type_stats[agent_type] = {"credits": [], "rewards": [], "group_hits": []}
+                type_stats[agent_type] = {"credits": [], "rewards": [], "group_hits": [], "deaths": []}
             type_stats[agent_type]["credits"].append(lob.credits_earned - lob.credits_spent)
             type_stats[agent_type]["rewards"].append(reward)
             type_stats[agent_type]["group_hits"].append(lob.group_hits)
+            type_stats[agent_type]["deaths"].append(lob.deaths_this_epoch)
 
-            # Reset credits and group_hits for new epoch
+            # Reset credits, group_hits, deaths for new epoch
             lob.credits_earned = 0.0
             lob.credits_spent = 0.0
             lob.group_hits = 0
+            lob.deaths_this_epoch = 0
 
         # New rifts (within active zone)
         zone_min, zone_max = self._active_zone_bounds()
@@ -302,6 +316,7 @@ class Ocean:
 
         # Summary by agent type
         print("=== EPOCH SUMMARY ===")
+        epoch_summary: dict[str, dict] = {}
         for atype in ("social", "greedy", "random"):
             stats = type_stats.get(atype)
             if not stats or not stats["credits"]:
@@ -309,13 +324,29 @@ class Ocean:
             avg_credits = sum(stats["credits"]) / len(stats["credits"])
             total_reward = sum(stats["rewards"])
             total_group_hits = sum(stats["group_hits"])
+            total_deaths = sum(stats["deaths"])
+            count = len(stats["credits"])
+            epoch_summary[atype] = {
+                "count": count,
+                "avg_credits": round(avg_credits, 1),
+                "total_reward": round(total_reward),
+                "group_hits": total_group_hits,
+                "deaths": total_deaths,
+            }
             print(
                 f"[EPOCH {epoch_num}] {atype}: "
                 f"avg_credits={avg_credits:.1f} "
                 f"total_reward={total_reward:,.0f} "
-                f"group_hits={total_group_hits}"
+                f"group_hits={total_group_hits} "
+                f"deaths={total_deaths}"
             )
         print()
+
+        # Save epoch history for viewer
+        self.epoch_history.append({
+            "epoch": epoch_num,
+            "types": epoch_summary,
+        })
 
     # ----- Helpers -----
 
@@ -442,6 +473,7 @@ class Ocean:
                 "alive": lob.alive,
                 "speaking": lob.speaking,
                 "net_credits": round(lob.credits_earned - lob.credits_spent, 2),
+                "grace": lob.grace_ticks > 0,
             })
 
         rifts = []
@@ -486,6 +518,7 @@ class Ocean:
             "rifts": rifts,
             "predators": predators,
             "sounds": self.current_sounds,
+            "epoch_history": self.epoch_history,
             "stats": {
                 "total_lobsters": len(self.lobsters),
                 "alive_lobsters": sum(1 for l in self.lobsters.values() if l.alive),
@@ -518,6 +551,7 @@ class Ocean:
         self.tick = 0
         self.lobsters.clear()
         self.next_lobster_id = 1
+        self.epoch_history.clear()
         self.pending_actions.clear()
         self.current_sounds.clear()
         self.rift_mgr.reset()
