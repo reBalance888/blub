@@ -1,165 +1,276 @@
 """
-social_agent.py — Agent that listens, builds language hypotheses, coordinates.
+social_agent.py — Agent that discovers contexts, builds language via Roth-Erev reinforcement.
 """
 from __future__ import annotations
 
+import math
 import random
 from base_agent import BlubAgent, SOUNDS
 
 
+class ContextDiscoverer:
+    """Adaptive context binning: tracks running min/max per dimension,
+    quantizes raw observation vectors into discrete context keys."""
+
+    def __init__(self, dims: int = 6, bins: int = 4, warmup: int = 50):
+        self.dims = dims
+        self.bins = bins
+        self.mins = [float('inf')] * dims
+        self.maxs = [float('-inf')] * dims
+        self.count = 0
+        self.warmup = warmup
+
+    def get_context(self, raw_vec: list[float]) -> tuple:
+        self.count += 1
+        for i in range(self.dims):
+            if raw_vec[i] < self.mins[i]:
+                self.mins[i] = raw_vec[i]
+            if raw_vec[i] > self.maxs[i]:
+                self.maxs[i] = raw_vec[i]
+        if self.count < self.warmup:
+            return (0,) * self.dims
+        key = []
+        for i in range(self.dims):
+            r = self.maxs[i] - self.mins[i]
+            if r > 0:
+                idx = min(int((raw_vec[i] - self.mins[i]) / r * self.bins), self.bins - 1)
+            else:
+                idx = 0
+            key.append(idx)
+        return tuple(key)
+
+
+class ProductionPolicy:
+    """Roth-Erev reinforcement learning for sound production per context."""
+
+    def __init__(self, n_sounds: int = 30, init_weight: float = 1.0, decay: float = 0.95):
+        self.weights: dict[tuple, list[float]] = {}
+        self.n_sounds = n_sounds
+        self.init = init_weight
+        self.decay = decay
+
+    def _ensure(self, ctx_key: tuple):
+        if ctx_key not in self.weights:
+            self.weights[ctx_key] = [self.init] * self.n_sounds
+
+    def produce(self, ctx_key: tuple) -> int:
+        """Sample a sound index proportional to weights for this context."""
+        self._ensure(ctx_key)
+        w = self.weights[ctx_key]
+        total = sum(w)
+        if total <= 0:
+            return random.randint(0, self.n_sounds - 1)
+        r = random.random() * total
+        cumulative = 0.0
+        for i, wi in enumerate(w):
+            cumulative += wi
+            if r <= cumulative:
+                return i
+        return self.n_sounds - 1
+
+    def reinforce(self, ctx_key: tuple, sound_idx: int, reward: float):
+        """Increase weight for this context-sound pair."""
+        self._ensure(ctx_key)
+        self.weights[ctx_key][sound_idx] += reward
+
+    def decay_all(self):
+        """Multiply all weights by decay factor."""
+        for ctx_key in self.weights:
+            self.weights[ctx_key] = [w * self.decay for w in self.weights[ctx_key]]
+
+    def top_sounds(self, ctx_key: tuple, n: int = 3) -> list[tuple[int, float]]:
+        """Return top-n (sound_idx, weight) for a context key."""
+        self._ensure(ctx_key)
+        w = self.weights[ctx_key]
+        total = sum(w)
+        if total <= 0:
+            return []
+        indexed = [(i, wi / total) for i, wi in enumerate(w)]
+        indexed.sort(key=lambda x: -x[1])
+        return indexed[:n]
+
+
+class Comprehension:
+    """Bayesian comprehension: tracks P(context | sound heard)."""
+
+    def __init__(self):
+        # {sound_idx: {ctx_key: count}}
+        self.counts: dict[int, dict[tuple, int]] = {}
+
+    def update(self, sound_idx: int, ctx_key: tuple):
+        if sound_idx not in self.counts:
+            self.counts[sound_idx] = {}
+        self.counts[sound_idx][ctx_key] = self.counts[sound_idx].get(ctx_key, 0) + 1
+
+    def best_meaning(self, sound_idx: int) -> tuple | None:
+        """Return the most likely context key for a sound, or None."""
+        if sound_idx not in self.counts:
+            return None
+        ctx_counts = self.counts[sound_idx]
+        if not ctx_counts:
+            return None
+        total = sum(ctx_counts.values())
+        best_ctx = max(ctx_counts, key=ctx_counts.get)
+        confidence = ctx_counts[best_ctx] / total
+        if confidence > 0.4 and total >= 3:
+            return best_ctx
+        return None
+
+    def has_rift_meaning(self, sound_idx: int) -> bool:
+        """Check if this sound is associated with a rift-related context
+        (dim 0 = low distance to rift, i.e. bin 0)."""
+        meaning = self.best_meaning(sound_idx)
+        if meaning is None:
+            return False
+        # dim 0 is distance to nearest rift; bin 0 = very close
+        return meaning[0] == 0
+
+
 class SocialAgent(BlubAgent):
     """
-    Builds a language model through observation.
+    Discovers contexts from raw state, produces sounds via Roth-Erev policy,
+    comprehends heard sounds via Bayesian updating.
 
-    Strategy:
-    1. Observe: when lobster X says sound S, what context is active?
-    2. Track correlations: S + context C -> count
-    3. Form hypotheses: S probably means C if correlation > threshold
-    4. Use hypotheses: say S when context C is true to attract others
-    5. Adapt: if hypothesis fails, weaken the link
+    6 context dimensions:
+      0: distance to nearest rift (Manhattan)
+      1: richness_pct of nearest rift
+      2: rift_type of nearest rift (gold=3, silver=2, copper=1, none=0)
+      3: nearby lobster count
+      4: nearby predator count
+      5: heading to nearest rift (0-7 compass, 8=none)
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # {sound: {context: count}}
-        self.correlations: dict[str, dict[str, int]] = {}
-        # {sound: {meaning, confidence}}
-        self.hypotheses: dict[str, dict] = {}
-        # {lobster_id: (x, y)} for tracking movements
-        self.last_positions: dict[str, tuple[int, int]] = {}
+        self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
+        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.95)
+        self.comprehension = Comprehension()
+        self.last_ctx: tuple = (0,) * 6
+        self.last_sound_idx: int | None = None
+        self.last_credits: float = 0.0
+        self.decay_counter: int = 0
 
-    def _get_context(self, state: dict, speaker_id: str) -> set[str]:
-        """Determine context when a sound was made."""
-        contexts: set[str] = set()
+    @staticmethod
+    def _heading(relative: list[int]) -> int:
+        """Convert relative [dx, dy] to compass heading 0-7."""
+        dx, dy = relative
+        if dx == 0 and dy == 0:
+            return 8  # at target
+        angle = math.atan2(dy, dx)
+        # 8 compass bins: E=0, SE=1, S=2, SW=3, W=4, NW=5, N=6, NE=7
+        idx = int((angle + math.pi) / (2 * math.pi) * 8) % 8
+        return idx
 
-        if state.get("nearby_rifts"):
-            contexts.add("near_rift")
+    def _extract_raw(self, state: dict) -> list[float]:
+        """Extract 6 raw dimensions from agent state."""
+        rifts = state.get("nearby_rifts", [])
+        if rifts:
+            closest = min(rifts, key=lambda r: abs(r["relative"][0]) + abs(r["relative"][1]))
+            d0 = abs(closest["relative"][0]) + abs(closest["relative"][1])
+            d1 = closest.get("richness_pct", 0.5)
+            rt = closest.get("rift_type", "silver")
+            d2 = {"gold": 3, "silver": 2, "copper": 1}.get(rt, 0)
+            d5 = self._heading(closest["relative"])
+        else:
+            d0, d1, d2, d5 = 99, 0, 0, 8
 
-        if state.get("nearby_predators"):
-            contexts.add("near_predator")
+        d3 = len(state.get("nearby_lobsters", []))
+        d4 = len(state.get("nearby_predators", []))
 
-        if len(state.get("nearby_lobsters", [])) >= 3:
-            contexts.add("crowded")
-
-        for lob in state.get("nearby_lobsters", []):
-            if lob["id"] == speaker_id:
-                last = self.last_positions.get(speaker_id)
-                if last:
-                    dx = lob["position"][0] - last[0]
-                    dy = lob["position"][1] - last[1]
-                    if dx > 0:
-                        contexts.add("moving_east")
-                    if dx < 0:
-                        contexts.add("moving_west")
-                    if dy > 0:
-                        contexts.add("moving_south")
-                    if dy < 0:
-                        contexts.add("moving_north")
-                self.last_positions[speaker_id] = tuple(lob["position"])
-
-        return contexts if contexts else {"no_context"}
+        return [d0, d1, d2, d3, d4, d5]
 
     def on_sounds_heard(self, sounds_events: list):
-        """Update correlations when sounds are received."""
+        """Update comprehension when sounds are received."""
+        raw = self._extract_raw(self.state)
+        ctx_key = self.ctx_discoverer.get_context(raw)
+
         for event in sounds_events:
-            speaker = event["from"]
-            contexts = self._get_context(self.state, speaker)
-
-            for sound in event["sounds"]:
-                if sound not in self.correlations:
-                    self.correlations[sound] = {}
-                for ctx in contexts:
-                    self.correlations[sound][ctx] = (
-                        self.correlations[sound].get(ctx, 0) + 1
-                    )
-
-        self._update_hypotheses()
-
-    def _update_hypotheses(self):
-        """Recalculate hypotheses about sound meanings."""
-        for sound, contexts in self.correlations.items():
-            if not contexts:
-                continue
-            total = sum(contexts.values())
-            best_ctx = max(contexts, key=contexts.get)
-            confidence = contexts[best_ctx] / total
-            if confidence > 0.4 and total >= 3:
-                self.hypotheses[sound] = {
-                    "meaning": best_ctx,
-                    "confidence": confidence,
-                }
+            for sound_name in event["sounds"]:
+                if sound_name in SOUNDS:
+                    sound_idx = SOUNDS.index(sound_name)
+                    self.comprehension.update(sound_idx, ctx_key)
 
     def think(self, state: dict) -> dict:
-        # Log hypotheses every 100 ticks
+        # Extract context
+        raw = self._extract_raw(state)
+        ctx_key = self.ctx_discoverer.get_context(raw)
+
+        # Reinforce last action based on credit delta
+        current_credits = state.get("my_net_credits", 0)
+        delta = current_credits - self.last_credits
+        if self.last_sound_idx is not None and delta > 0:
+            self.production.reinforce(self.last_ctx, self.last_sound_idx, delta)
+        self.last_credits = current_credits
+
+        # Decay weights every 50 ticks
+        self.decay_counter += 1
+        if self.decay_counter >= 50:
+            self.production.decay_all()
+            self.decay_counter = 0
+
+        # Log every 100 ticks
         if state["tick"] % 100 == 0:
-            if self.hypotheses:
-                hyp_summary = {s: f'{h["meaning"]}({h["confidence"]:.0%})' for s, h in self.hypotheses.items()}
-                print(f"[{self.name}] tick={state['tick']} Hypotheses: {hyp_summary}")
-            else:
-                top_corr = {}
-                for sound, ctxs in list(self.correlations.items())[:5]:
-                    if ctxs:
-                        best = max(ctxs, key=ctxs.get)
-                        top_corr[sound] = f"{best}:{ctxs[best]}"
-                print(f"[{self.name}] tick={state['tick']} No hypotheses yet | Top correlations: {top_corr}")
+            active_contexts = len(self.production.weights)
+            top_ctx = sorted(
+                self.production.weights.keys(),
+                key=lambda k: max(self.production.weights[k]),
+                reverse=True,
+            )[:3] if self.production.weights else []
+            top_info = {}
+            for ck in top_ctx:
+                top_s = self.production.top_sounds(ck, 1)
+                if top_s:
+                    top_info[str(ck)] = f"{SOUNDS[top_s[0][0]]}({top_s[0][1]:.0%})"
+            print(f"[{self.name}] tick={state['tick']} contexts={active_contexts} top={top_info}")
 
         speak: list[str] = []
 
-        # If near rift — ALWAYS speak to create data for learning
-        if state.get("nearby_rifts"):
-            rift_sound = self._sound_for("near_rift")
-            if rift_sound:
-                speak = [rift_sound]
-            else:
-                # No hypothesis yet — say a random sound (others will correlate it with rift)
-                speak = [random.choice(SOUNDS)]
+        # Produce sound based on current context
+        # Always speak near rifts, 30% elsewhere
+        near_rift = bool(state.get("nearby_rifts"))
+        near_predator = bool(state.get("nearby_predators"))
 
-        # If predator nearby — warn and flee
-        if state.get("nearby_predators"):
-            danger_sound = self._sound_for("near_predator")
-            if danger_sound:
-                speak = [danger_sound]
-            else:
-                speak = [random.choice(SOUNDS)]
+        if near_rift or near_predator or random.random() < 0.3:
+            sound_idx = self.production.produce(ctx_key)
+            speak = [SOUNDS[sound_idx]]
+            self.last_sound_idx = sound_idx
+            self.last_ctx = ctx_key
+        else:
+            self.last_sound_idx = None
+            self.last_ctx = ctx_key
+
+        # Movement: flee predators > respond to heard rift sounds > go to rift > wander
+        if near_predator:
             pred = state["nearby_predators"][0]
             dx, dy = pred["relative"]
-            if dx > 0:
-                move = "west"
-            elif dx < 0:
-                move = "east"
-            elif dy > 0:
-                move = "north"
-            else:
-                move = "south"
+            move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
             return {"move": move, "speak": speak, "act": None}
 
-        # If heard a "near_rift" sound — go toward the speaker
+        # If heard a sound that means "near rift" — go toward the speaker
         for event in state.get("sounds_heard", []):
-            for sound in event["sounds"]:
-                hyp = self.hypotheses.get(sound)
-                if hyp and hyp["meaning"] == "near_rift" and hyp["confidence"] > 0.5:
-                    for lob in state.get("nearby_lobsters", []):
-                        if lob["id"] == event["from"]:
-                            dx, dy = lob["relative"]
-                            if dx > 0:
-                                move = "east"
-                            elif dx < 0:
-                                move = "west"
-                            elif dy > 0:
-                                move = "south"
-                            elif dy < 0:
-                                move = "north"
-                            else:
-                                move = "stay"
-                            return {"move": move, "speak": speak, "act": None}
+            for sound_name in event["sounds"]:
+                if sound_name in SOUNDS:
+                    sidx = SOUNDS.index(sound_name)
+                    if self.comprehension.has_rift_meaning(sidx):
+                        for lob in state.get("nearby_lobsters", []):
+                            if lob["id"] == event["from"]:
+                                dx, dy = lob["relative"]
+                                if dx > 0:
+                                    move = "east"
+                                elif dx < 0:
+                                    move = "west"
+                                elif dy > 0:
+                                    move = "south"
+                                elif dy < 0:
+                                    move = "north"
+                                else:
+                                    move = "stay"
+                                return {"move": move, "speak": speak, "act": None}
 
-        # Default: move toward rift or wander
+        # Move toward nearest rift
         rifts = state.get("nearby_rifts", [])
         if rifts:
-            closest = min(
-                rifts,
-                key=lambda r: abs(r["relative"][0]) + abs(r["relative"][1]),
-            )
+            closest = min(rifts, key=lambda r: abs(r["relative"][0]) + abs(r["relative"][1]))
             dx, dy = closest["relative"]
             if dx > 0:
                 move = "east"
@@ -174,18 +285,7 @@ class SocialAgent(BlubAgent):
         else:
             move = random.choice(["north", "south", "east", "west"])
 
-        # Speak random sound 20% of the time even without context — generates data
-        if not speak and random.random() < 0.2:
-            speak = [random.choice(SOUNDS)]
-
         return {"move": move, "speak": speak, "act": None}
-
-    def _sound_for(self, meaning: str) -> str | None:
-        """Find a sound with the given meaning."""
-        for sound, hyp in self.hypotheses.items():
-            if hyp["meaning"] == meaning:
-                return sound
-        return None
 
 
 if __name__ == "__main__":

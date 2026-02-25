@@ -12,6 +12,7 @@ from .rift import RiftManager, Rift
 from .predator import PredatorManager, Predator
 from .economy import EconomyManager
 from .epoch import EpochManager
+from .metrics import MetricsLogger
 
 
 @dataclass
@@ -58,11 +59,17 @@ class Ocean:
         # Sounds emitted this tick: [{from, sounds, pos}]
         self.current_sounds: list[dict] = []
 
+        # Server-side sound-context correlations for emergent dictionary
+        # {sound: {context: count}}
+        self.sound_correlations: dict[str, dict[str, int]] = {}
+
         # Sub-managers
         self.rift_mgr = RiftManager(config)
         self.predator_mgr = PredatorManager(config)
         self.economy = EconomyManager(config)
         self.epoch_mgr = EpochManager(config)
+        self.metrics_logger = MetricsLogger()
+        self.latest_metrics: dict = {}
 
         # Init first epoch rifts (within active zone)
         zone_min, zone_max = self._active_zone_bounds()
@@ -173,6 +180,9 @@ class Ocean:
         # Log every 100 ticks
         if self.tick % 100 == 0:
             self._log_stats()
+            self.latest_metrics = self.metrics_logger.compute(
+                self.tick, self.epoch_mgr.epoch, self.lobsters
+            )
 
     def _process_movements(self):
         directions = {
@@ -195,6 +205,7 @@ class Ocean:
     def _process_sounds(self):
         sound_cost = self.config["economy"]["sound_credit_cost"]
         valid_sounds = set(self.sounds)
+        rift_radius = self.config["rifts"]["radius"]
 
         for agent_id, actions in self.pending_actions.items():
             lob = self.lobsters.get(agent_id)
@@ -218,6 +229,21 @@ class Ocean:
                     "pos": [lob.x, lob.y],
                 })
 
+                # Track sound-context correlations (server-side)
+                contexts = self._get_speaker_context(lob, rift_radius)
+                for snd in sounds:
+                    if snd not in self.sound_correlations:
+                        self.sound_correlations[snd] = {}
+                    for ctx in contexts:
+                        self.sound_correlations[snd][ctx] = (
+                            self.sound_correlations[snd].get(ctx, 0) + 1
+                        )
+
+                # Record for metrics
+                ctx_key = self._get_speaker_context_key(lob, rift_radius)
+                reward = lob.credits_earned - lob.credits_spent
+                self.metrics_logger.record(sounds, ctx_key, reward)
+
     def _process_rift_rewards(self):
         for rift in self.rift_mgr.active_rifts:
             nearby = self._lobsters_near(rift.x, rift.y, self.config["rifts"]["radius"])
@@ -225,9 +251,12 @@ class Ocean:
                 continue
             n = len(nearby)
             reward = self.rift_mgr.calc_group_reward(n)
-            total_drain = n * reward
+            # Per-type depletion: scale drain by rift type's depletion_rate / base 0.02
+            depletion_rate = self.rift_mgr.depletion_rate_for_type(rift.rift_type)
+            drain_multiplier = depletion_rate / 0.02
+            total_drain = n * reward * drain_multiplier
             if total_drain > rift.richness:
-                reward = rift.richness / n if n > 0 else 0
+                reward = rift.richness / (n * drain_multiplier) if n > 0 else 0
                 total_drain = rift.richness
             for lob in nearby:
                 lob.credits_earned += reward
@@ -350,6 +379,111 @@ class Ocean:
 
     # ----- Helpers -----
 
+    def _get_speaker_context(self, lob: Lobster, rift_radius: int) -> set[str]:
+        """Determine context for a speaking lobster (server-side ground truth)."""
+        contexts: set[str] = set()
+
+        # Near rift?
+        for rift in self.rift_mgr.active_rifts:
+            if abs(lob.x - rift.x) <= rift_radius and abs(lob.y - rift.y) <= rift_radius:
+                contexts.add("near_rift")
+                break
+
+        # Near predator?
+        for pred in self.predator_mgr.active_predators:
+            if abs(lob.x - pred.x) <= 5 and abs(lob.y - pred.y) <= 5:
+                contexts.add("danger")
+                break
+
+        # Crowded?
+        nearby_count = sum(
+            1 for other in self.lobsters.values()
+            if other.id != lob.id and other.alive
+            and abs(other.x - lob.x) <= 3 and abs(other.y - lob.y) <= 3
+        )
+        if nearby_count >= 3:
+            contexts.add("crowded")
+
+        return contexts if contexts else {"open_water"}
+
+    def _get_speaker_context_key(self, lob: Lobster, rift_radius: int) -> tuple:
+        """Build a discrete context key tuple for metrics (mirrors agent ContextDiscoverer dims)."""
+        # dim 0: distance to nearest rift
+        rifts = self.rift_mgr.active_rifts
+        if rifts:
+            closest = min(rifts, key=lambda r: abs(lob.x - r.x) + abs(lob.y - r.y))
+            d0 = abs(lob.x - closest.x) + abs(lob.y - closest.y)
+            max_richness = self.rift_mgr._richness_for_type(closest.rift_type)
+            d1 = closest.richness / max_richness if max_richness > 0 else 0
+            d2 = {"gold": 3, "silver": 2, "copper": 1}.get(closest.rift_type, 0)
+        else:
+            d0, d1, d2 = 99, 0, 0
+
+        # dim 3: nearby lobster count
+        d3 = sum(
+            1 for other in self.lobsters.values()
+            if other.id != lob.id and other.alive
+            and abs(other.x - lob.x) <= 5 and abs(other.y - lob.y) <= 5
+        )
+        # dim 4: nearby predator count
+        d4 = sum(
+            1 for pred in self.predator_mgr.active_predators
+            if abs(pred.x - lob.x) <= 5 and abs(pred.y - lob.y) <= 5
+        )
+
+        # Bin: simple 4-bin quantization
+        def _bin(val, lo, hi, bins=4):
+            if hi <= lo:
+                return 0
+            return min(int((val - lo) / (hi - lo) * bins), bins - 1)
+
+        return (
+            _bin(d0, 0, 50),
+            _bin(d1, 0, 1),
+            d2,
+            _bin(d3, 0, 10),
+            _bin(d4, 0, 5),
+            0,  # heading placeholder (server doesn't track per-agent heading)
+        )
+
+    def _build_emergent_dictionary(self) -> list[dict]:
+        """Build dictionary from accumulated sound-context correlations."""
+        dictionary = []
+        for sound, contexts in self.sound_correlations.items():
+            total = sum(contexts.values())
+            if total < 5:
+                continue
+            best_ctx = max(contexts, key=contexts.get)
+            confidence = contexts[best_ctx] / total
+            if confidence > 0.3:
+                dictionary.append({
+                    "sound": sound,
+                    "meaning": best_ctx,
+                    "confidence": round(confidence, 2),
+                    "observations": total,
+                })
+        dictionary.sort(key=lambda x: (-x["confidence"], -x["observations"]))
+        return dictionary
+
+    def _build_sound_lines(self) -> list[dict]:
+        """Build communication lines: speaker → each listener in range."""
+        lines = []
+        for snd in self.current_sounds:
+            speaker = self.lobsters.get(snd["from"])
+            if not speaker:
+                continue
+            tier_info = self.get_tier_info(self.get_tier(speaker))
+            sound_range = tier_info["sound_range"]
+            for lob in self.lobsters.values():
+                if lob.id == speaker.id or not lob.alive:
+                    continue
+                if abs(lob.x - speaker.x) <= sound_range and abs(lob.y - speaker.y) <= sound_range:
+                    lines.append({
+                        "from": [speaker.x, speaker.y],
+                        "to": [lob.x, lob.y],
+                    })
+        return lines
+
     def _lobsters_near(self, x: int, y: int, radius: int) -> list[Lobster]:
         result = []
         for lob in self.lobsters.values():
@@ -405,12 +539,14 @@ class Ocean:
             dx = rift.x - lob.x
             dy = rift.y - lob.y
             if abs(dx) <= vision and abs(dy) <= vision:
-                pct = rift.richness / self.config["rifts"]["base_richness"] if self.config["rifts"]["base_richness"] > 0 else 0
+                max_richness = self.rift_mgr._richness_for_type(rift.rift_type)
+                pct = rift.richness / max_richness if max_richness > 0 else 0
                 nearby_rifts.append({
                     "id": rift.id,
                     "position": [rift.x, rift.y],
                     "richness_pct": round(pct, 2),
                     "relative": [dx, dy],
+                    "rift_type": rift.rift_type,
                 })
 
         # Nearby predators
@@ -478,12 +614,13 @@ class Ocean:
 
         rifts = []
         for rift in self.rift_mgr.active_rifts:
-            base = self.config["rifts"]["base_richness"]
-            pct = rift.richness / base if base > 0 else 0
+            max_richness = self.rift_mgr._richness_for_type(rift.rift_type)
+            pct = rift.richness / max_richness if max_richness > 0 else 0
             rifts.append({
                 "id": rift.id,
                 "pos": [rift.x, rift.y],
                 "richness_pct": round(pct, 2),
+                "rift_type": rift.rift_type,
             })
 
         predators = []
@@ -518,7 +655,10 @@ class Ocean:
             "rifts": rifts,
             "predators": predators,
             "sounds": self.current_sounds,
+            "sound_lines": self._build_sound_lines(),
+            "emergent_dictionary": self._build_emergent_dictionary(),
             "epoch_history": self.epoch_history,
+            "metrics": self.latest_metrics,
             "stats": {
                 "total_lobsters": len(self.lobsters),
                 "alive_lobsters": sum(1 for l in self.lobsters.values() if l.alive),
@@ -552,11 +692,14 @@ class Ocean:
         self.lobsters.clear()
         self.next_lobster_id = 1
         self.epoch_history.clear()
+        self.sound_correlations.clear()
         self.pending_actions.clear()
         self.current_sounds.clear()
         self.rift_mgr.reset()
         self.predator_mgr.reset()
         self.epoch_mgr.reset()
+        self.metrics_logger.reset()
+        self.latest_metrics = {}
         self._recalculate_active_zone()
         zone_min, zone_max = self._active_zone_bounds()
         self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)

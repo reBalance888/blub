@@ -8,10 +8,21 @@ ocean:
 
 rifts:
   count_per_epoch: 8
-  base_richness: 5000
-  depletion_per_tick_per_lobster: 0.02
   radius: 3
   respawn_interval: 50
+  types:
+    gold:
+      richness: 8000
+      depletion_rate: 0.04
+      spawn_weight: 0.2
+    silver:
+      richness: 5000
+      depletion_rate: 0.02
+      spawn_weight: 0.5
+    copper:
+      richness: 2000
+      depletion_rate: 0.01
+      spawn_weight: 0.3
 
 predators:
   base_spawn_rate: 0.0008

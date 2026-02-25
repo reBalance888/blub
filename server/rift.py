@@ -4,6 +4,7 @@ rift.py — Rift spawning, depletion, group bonus rewards.
 from __future__ import annotations
 
 import hashlib
+import random
 from dataclasses import dataclass
 
 
@@ -13,6 +14,7 @@ class Rift:
     x: int
     y: int
     richness: float
+    rift_type: str = "silver"
     spawn_tick: int = 0
 
 
@@ -23,20 +25,33 @@ class RiftManager:
         self.next_rift_id: int = 1
         self.last_respawn_tick: int = 0
 
+    def _pick_rift_type(self) -> str:
+        """Weighted random choice of rift type from config."""
+        types_cfg = self.config["rifts"]["types"]
+        names = list(types_cfg.keys())
+        weights = [types_cfg[n]["spawn_weight"] for n in names]
+        return random.choices(names, weights=weights, k=1)[0]
+
+    def _richness_for_type(self, rift_type: str) -> float:
+        return self.config["rifts"]["types"][rift_type]["richness"]
+
+    def depletion_rate_for_type(self, rift_type: str) -> float:
+        return self.config["rifts"]["types"][rift_type]["depletion_rate"]
+
     def spawn_epoch_rifts(self, epoch: int, zone_min: int, zone_size: int):
         """Spawn rifts for a new epoch within the active zone. Clears old rifts."""
         self.active_rifts.clear()
         self._zone_min = zone_min
         self._zone_size = zone_size
         count = self.config["rifts"]["count_per_epoch"]
-        base_richness = self.config["rifts"]["base_richness"]
 
         for i in range(count):
             x, y = self._rift_position(epoch, i, zone_min, zone_size)
             rid = f"rift_{self.next_rift_id}"
             self.next_rift_id += 1
+            rtype = self._pick_rift_type()
             self.active_rifts.append(
-                Rift(id=rid, x=x, y=y, richness=base_richness)
+                Rift(id=rid, x=x, y=y, richness=self._richness_for_type(rtype), rift_type=rtype)
             )
 
     def _rift_position(self, epoch_seed: int, rift_index: int, zone_min: int, zone_size: int) -> tuple[int, int]:
@@ -75,13 +90,14 @@ class RiftManager:
             if len(self.active_rifts) < self.config["rifts"]["count_per_epoch"]:
                 rid = f"rift_{self.next_rift_id}"
                 self.next_rift_id += 1
-                import random
                 zm = getattr(self, '_zone_min', 0)
                 zs = getattr(self, '_zone_size', 100)
                 x = random.randint(zm, zm + zs - 1)
                 y = random.randint(zm, zm + zs - 1)
+                rtype = self._pick_rift_type()
                 self.active_rifts.append(
-                    Rift(id=rid, x=x, y=y, richness=self.config["rifts"]["base_richness"], spawn_tick=current_tick)
+                    Rift(id=rid, x=x, y=y, richness=self._richness_for_type(rtype),
+                         rift_type=rtype, spawn_tick=current_tick)
                 )
             self.last_respawn_tick = current_tick
 

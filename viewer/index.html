@@ -35,6 +35,11 @@ const COLORS = {
   grid: 'rgba(0, 212, 255, 0.04)',
   rift: '#00d4ff',
   riftGlow: 'rgba(0, 212, 255, 0.3)',
+  riftType: {
+    gold: '#ffd700',
+    silver: '#c0c0c0',
+    copper: '#cd7f32',
+  },
   predator: '#ff4757',
   sound: '#7fdbca',
   dead: 'rgba(120, 120, 120, 0.5)',
@@ -180,26 +185,46 @@ function App() {
       ctx.fillRect((az.max + 1) * CELL, az.min * CELL, W - (az.max + 1) * CELL, az.size * CELL);
     }
 
-    // Rifts (pulsing circles)
+    // Communication lines (speaker → listener)
+    if (state.sound_lines && state.sound_lines.length > 0) {
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = COLORS.sound;
+      ctx.lineWidth = 1;
+      for (const line of state.sound_lines) {
+        const x1 = line.from[0] * CELL + CELL / 2;
+        const y1 = line.from[1] * CELL + CELL / 2;
+        const x2 = line.to[0] * CELL + CELL / 2;
+        const y2 = line.to[1] * CELL + CELL / 2;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Rifts (pulsing circles, colored by type)
     const pulse = 0.8 + 0.2 * Math.sin(Date.now() / 500);
     for (const rift of state.rifts) {
       const rx = rift.pos[0] * CELL + CELL / 2;
       const ry = rift.pos[1] * CELL + CELL / 2;
       const baseR = 3 * CELL;
       const r = baseR * rift.richness_pct * pulse;
+      const riftColor = COLORS.riftType[rift.rift_type] || COLORS.rift;
 
       // Glow
       const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, r);
-      grad.addColorStop(0, 'rgba(0, 212, 255, 0.4)');
-      grad.addColorStop(0.5, 'rgba(0, 212, 255, 0.15)');
-      grad.addColorStop(1, 'rgba(0, 212, 255, 0)');
+      const rc = riftColor;
+      grad.addColorStop(0, rc + '66');
+      grad.addColorStop(0.5, rc + '26');
+      grad.addColorStop(1, rc + '00');
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(rx, ry, r, 0, Math.PI * 2);
       ctx.fill();
 
       // Core
-      ctx.fillStyle = COLORS.rift;
+      ctx.fillStyle = riftColor;
       ctx.beginPath();
       ctx.arc(rx, ry, CELL * 0.4, 0, Math.PI * 2);
       ctx.fill();
@@ -445,6 +470,20 @@ function App() {
           <Row label="Credits on Sounds" value={s.total_credits_spent_on_sounds?.toLocaleString()} />
         </Panel>
 
+        {/* Metrics */}
+        {state.metrics && state.metrics.tick && (
+          <Panel title="LANGUAGE METRICS">
+            <Row label="Vocabulary" value={state.metrics.vocabulary_size} color={COLORS.accent} />
+            <Row label="TopSim" value={state.metrics.top_sim?.toFixed(3)} color={state.metrics.top_sim > 0.3 ? '#2ed573' : COLORS.text} />
+            <Row label="PosDis" value={state.metrics.pos_dis?.toFixed(3)} color={state.metrics.pos_dis > 0.2 ? '#2ed573' : COLORS.text} />
+            <Row label="MI" value={state.metrics.mutual_info?.toFixed(3)} color={state.metrics.mutual_info > 0.5 ? '#2ed573' : COLORS.text} />
+            <Row label="Econ Delta" value={state.metrics.economic_delta?.toFixed(1)} color={state.metrics.economic_delta > 0 ? '#2ed573' : COLORS.predator} />
+            <div style={{ fontSize: 8, color: COLORS.textDim, marginTop: 4, textAlign: 'center' }}>
+              updated every 100 ticks
+            </div>
+          </Panel>
+        )}
+
         {/* Leaderboard */}
         <Panel title="LEADERBOARD">
           {topLobsters.map((lob, i) => (
@@ -484,7 +523,111 @@ function App() {
           </Panel>
         )}
 
-        {/* Epoch History */}
+        {/* Emergent Dictionary */}
+        {state.emergent_dictionary && state.emergent_dictionary.length > 0 && (
+          <Panel title="EMERGENT DICTIONARY">
+            <div style={{ fontSize: 10 }}>
+              {state.emergent_dictionary.slice(0, 12).map(entry => {
+                const barWidth = Math.round(entry.confidence * 100);
+                const meaningColor = entry.meaning === 'near_rift' ? COLORS.rift
+                  : entry.meaning === 'danger' ? COLORS.predator
+                  : entry.meaning === 'crowded' ? COLORS.gold
+                  : COLORS.textDim;
+                return (
+                  <div key={entry.sound} style={{ marginBottom: 3 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: COLORS.sound, fontWeight: 'bold' }}>{entry.sound}</span>
+                      <span style={{ color: meaningColor, fontSize: 9 }}>{entry.meaning}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <div style={{
+                        flex: 1, height: 3, background: COLORS.panelBorder, borderRadius: 2,
+                      }}>
+                        <div style={{
+                          width: `${barWidth}%`, height: '100%', borderRadius: 2,
+                          background: meaningColor,
+                          opacity: 0.7,
+                        }} />
+                      </div>
+                      <span style={{ color: COLORS.textDim, fontSize: 8, minWidth: 28, textAlign: 'right' }}>
+                        {Math.round(entry.confidence * 100)}%
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ color: COLORS.textDim, fontSize: 8, marginTop: 4, textAlign: 'center' }}>
+                server-side ground truth correlations
+              </div>
+            </div>
+          </Panel>
+        )}
+
+        {/* Epoch Chart (SVG line chart S vs G vs R) */}
+        {state.epoch_history && state.epoch_history.length >= 2 && (
+          <Panel title="EPOCH REWARDS">
+            {(() => {
+              const data = state.epoch_history;
+              const W = 240, H = 80, PAD = 20;
+              const plotW = W - PAD * 2, plotH = H - PAD;
+              const maxVal = Math.max(...data.flatMap(d =>
+                ['social','greedy','random'].map(t => d.types[t]?.total_reward || 0)
+              ));
+              const xStep = data.length > 1 ? plotW / (data.length - 1) : 0;
+
+              const makeLine = (type) => {
+                return data.map((d, i) => {
+                  const v = d.types[type]?.total_reward || 0;
+                  const x = PAD + i * xStep;
+                  const y = PAD + plotH - (maxVal > 0 ? (v / maxVal) * plotH : 0);
+                  return `${x},${y}`;
+                }).join(' ');
+              };
+
+              const fmt = (v) => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(0)}k` : v;
+
+              return (
+                <svg width={W} height={H} style={{ display: 'block' }}>
+                  {/* Grid lines */}
+                  <line x1={PAD} y1={PAD} x2={PAD} y2={H} stroke={COLORS.panelBorder} strokeWidth="1" />
+                  <line x1={PAD} y1={H} x2={W - PAD} y2={H} stroke={COLORS.panelBorder} strokeWidth="1" />
+                  {/* Max value label */}
+                  <text x={PAD - 2} y={PAD + 4} fill={COLORS.textDim} fontSize="7" textAnchor="end">{fmt(maxVal)}</text>
+                  <text x={PAD - 2} y={H} fill={COLORS.textDim} fontSize="7" textAnchor="end">0</text>
+
+                  {/* Lines */}
+                  <polyline points={makeLine('social')} fill="none" stroke={TYPE_COLOR.social} strokeWidth="2" />
+                  <polyline points={makeLine('greedy')} fill="none" stroke={TYPE_COLOR.greedy} strokeWidth="2" strokeDasharray="4 2" />
+                  <polyline points={makeLine('random')} fill="none" stroke={TYPE_COLOR.random} strokeWidth="1.5" strokeDasharray="2 2" />
+
+                  {/* Dots for last epoch */}
+                  {['social','greedy','random'].map(type => {
+                    const lastIdx = data.length - 1;
+                    const v = data[lastIdx].types[type]?.total_reward || 0;
+                    const x = PAD + lastIdx * xStep;
+                    const y = PAD + plotH - (maxVal > 0 ? (v / maxVal) * plotH : 0);
+                    return <circle key={type} cx={x} cy={y} r="3" fill={TYPE_COLOR[type]} />;
+                  })}
+
+                  {/* Epoch labels */}
+                  {data.map((d, i) => (
+                    <text key={i} x={PAD + i * xStep} y={H + 1} fill={COLORS.textDim} fontSize="7" textAnchor="middle">
+                      {d.epoch}
+                    </text>
+                  ))}
+                </svg>
+              );
+            })()}
+            {/* Compact legend */}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 2 }}>
+              {[['S', TYPE_COLOR.social], ['G', TYPE_COLOR.greedy], ['R', TYPE_COLOR.random]].map(([label, color]) => (
+                <span key={label} style={{ fontSize: 9, color }}>{label}</span>
+              ))}
+            </div>
+          </Panel>
+        )}
+
+        {/* Epoch History Table */}
         {state.epoch_history && state.epoch_history.length > 0 && (
           <Panel title="EPOCH HISTORY">
             <div style={{ fontSize: 10, overflowX: 'auto' }}>
@@ -573,7 +716,9 @@ function App() {
           <LegendItem color={COLORS.tier.shrimp} label="Shrimp (vision 5)" />
           <LegendItem color={COLORS.tier.lobster} label="Lobster (vision 12)" />
           <LegendItem color={COLORS.tier.kraken} label="Kraken (vision 25)" />
-          <LegendItem color={COLORS.rift} label="Rift (credits)" shape="circle" />
+          <LegendItem color={COLORS.riftType.gold} label="Gold rift" shape="circle" />
+          <LegendItem color={COLORS.riftType.silver} label="Silver rift" shape="circle" />
+          <LegendItem color={COLORS.riftType.copper} label="Copper rift" shape="circle" />
           <LegendItem color={COLORS.predator} label="Predator" shape="triangle" />
           <LegendItem color={COLORS.accent} label="Grace shield (immune)" shape="circle" />
           <div style={{ marginTop: 4, borderTop: `1px solid ${COLORS.panelBorder}`, paddingTop: 4 }}>
