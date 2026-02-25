@@ -476,6 +476,7 @@ function App() {
             <Row label="Vocabulary" value={state.metrics.vocabulary_size} color={COLORS.accent} />
             <Row label="TopSim" value={state.metrics.top_sim?.toFixed(3)} color={state.metrics.top_sim > 0.3 ? '#2ed573' : COLORS.text} />
             <Row label="PosDis" value={state.metrics.pos_dis?.toFixed(3)} color={state.metrics.pos_dis > 0.2 ? '#2ed573' : COLORS.text} />
+            <Row label="BosDis" value={state.metrics.bos_dis?.toFixed(3)} color={state.metrics.bos_dis > 0.2 ? '#2ed573' : COLORS.text} />
             <Row label="MI" value={state.metrics.mutual_info?.toFixed(3)} color={state.metrics.mutual_info > 0.5 ? '#2ed573' : COLORS.text} />
             <Row label="Econ Delta" value={state.metrics.economic_delta?.toFixed(1)} color={state.metrics.economic_delta > 0 ? '#2ed573' : COLORS.predator} />
             <Row label="CSR" value={state.metrics.csr != null ? `${(state.metrics.csr * 100).toFixed(1)}%` : '-'} color={state.metrics.csr > 0.3 ? '#2ed573' : COLORS.text} />

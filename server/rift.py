@@ -65,7 +65,7 @@ class RiftManager:
         if n == 0:
             return 0.0
         if n == 1:
-            return 0.1
+            return 0.5  # raised from 0.1 — newcomer viability (Game Designer rec)
         if n == 2:
             return 1.0
         if n == 3:

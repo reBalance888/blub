@@ -31,6 +31,7 @@ class MetricsLogger:
             "vocabulary_size": self._vocab_size(),
             "top_sim": self._topographic_similarity(),
             "pos_dis": self._positional_disentanglement(),
+            "bos_dis": self._bag_of_symbols_disentanglement(),
             "mutual_info": self._mutual_information(),
             "economic_delta": self._economic_delta(lobsters),
             "csr": csr,
@@ -148,6 +149,53 @@ class MetricsLogger:
                 scores.append(max(0.0, min(1.0, gap)))
 
         return sum(scores) / len(scores) if scores else 0.0
+
+    def _bag_of_symbols_disentanglement(self) -> float:
+        """BosDis (Chaabouni 2020): for each context dimension, how well is it
+        predicted by the BAG (unordered set) of symbols in the message?
+        Complementary to PosDis — measures order-independent encoding."""
+        if len(self.observations) < 20:
+            return 0.0
+
+        multi = [(seq, ctx) for seq, ctx, _ in self.observations if len(seq) > 1]
+        if len(multi) < 10:
+            return 0.0
+
+        n_dims = len(multi[0][1]) if multi else 0
+        if n_dims == 0:
+            return 0.0
+
+        scores = []
+        for k in range(n_dims):
+            # Build bag-of-symbols representation for each message
+            bags = [frozenset(seq) for seq, _ in multi]
+            dims_vals = [ctx[k] for _, ctx in multi]
+
+            if len(set(dims_vals)) < 2:
+                continue
+
+            # H(bag)
+            h_bag = _entropy_list(bags)
+            if h_bag < 0.01:
+                continue
+
+            # MI(bag, dim_k)
+            mi_k = _mi_two_lists(bags, dims_vals)
+
+            # MI(bag, dim_j) for all other dims j != k
+            other_mis = []
+            for j in range(n_dims):
+                if j == k:
+                    continue
+                other_vals = [ctx[j] for _, ctx in multi]
+                other_mis.append(_mi_two_lists(bags, other_vals))
+
+            if other_mis and h_bag > 0:
+                max_other = max(other_mis)
+                gap = (mi_k - max_other) / h_bag
+                scores.append(max(0.0, min(1.0, gap)))
+
+        return round(sum(scores) / len(scores), 4) if scores else 0.0
 
     def _mutual_information(self) -> float:
         """MI(signal; context) from joint frequency table."""

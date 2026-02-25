@@ -73,6 +73,9 @@ class ContextDiscoverer:
 class ProductionPolicy:
     """Roth-Erev reinforcement learning for sound production per context."""
 
+    LATERAL_INHIBITION = 0.05  # competing sounds lose 5% of reinforcement (Franke 2014)
+    MUTATION_RATE = 0.05  # 5% chance of random sound instead of learned (anti-ossification)
+
     def __init__(self, n_sounds: int = 30, init_weight: float = 1.0, decay: float = 0.95):
         self.weights: dict[tuple, list[float]] = {}
         self.n_sounds = n_sounds
@@ -84,7 +87,11 @@ class ProductionPolicy:
             self.weights[ctx_key] = [self.init] * self.n_sounds
 
     def produce(self, ctx_key: tuple) -> int:
-        """Sample a sound index proportional to weights for this context."""
+        """Sample a sound index proportional to weights for this context.
+        Mutation: small chance of random sound to prevent ossification."""
+        # Anti-ossification: mutation produces random sound (Kirby 2015)
+        if random.random() < self.MUTATION_RATE:
+            return random.randint(0, self.n_sounds - 1)
         self._ensure(ctx_key)
         w = self.weights[ctx_key]
         total = sum(w)
@@ -100,11 +107,20 @@ class ProductionPolicy:
 
     def reinforce(self, ctx_key: tuple, sound_idx: int, reward: float):
         """Increase weight for this context-sound pair.
+        Lateral inhibition: competing sounds are suppressed (Franke 2014).
         Spill-over: also reinforce Hamming-distance neighbors for generalization."""
         self._ensure(ctx_key)
         self.weights[ctx_key][sound_idx] += reward
-        # Spill-over to neighboring context bins
+        # Lateral inhibition: suppress competing sounds for this context
         if reward > 0:
+            inhibition = reward * self.LATERAL_INHIBITION
+            for i in range(self.n_sounds):
+                if i != sound_idx:
+                    self.weights[ctx_key][i] = max(
+                        self.init * 0.1,  # floor to prevent negative/zero weights
+                        self.weights[ctx_key][i] - inhibition,
+                    )
+            # Spill-over to neighboring context bins
             self._spillover(ctx_key, sound_idx, reward)
 
     def _spillover(self, ctx_key: tuple, sound_idx: int, reward: float):

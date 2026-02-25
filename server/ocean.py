@@ -278,7 +278,9 @@ class Ocean:
                 reward = rift.richness / (n * drain_multiplier) if n > 0 else 0
                 total_drain = rift.richness
             for lob in nearby:
-                lob.credits_earned += reward
+                # Newcomer discovery bonus: 2x rewards for first 50 ticks (Game Designer rec)
+                bonus = 2.0 if lob.age < 50 else 1.0
+                lob.credits_earned += reward * bonus
                 if n >= 2:
                     lob.group_hits += 1
             rift.richness -= total_drain
