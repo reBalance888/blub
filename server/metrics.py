@@ -13,36 +13,84 @@ from pathlib import Path
 class MetricsLogger:
     def __init__(self, log_file: str = "metrics_log.jsonl"):
         self.log_file = Path(log_file)
-        # Each observation: (sound_seq tuple, context_key tuple, reward float)
+        # Short buffer: per-epoch observations for PosDis/BosDis (cleared each epoch)
         self.observations: list[tuple[tuple, tuple, float]] = []
+        # Long buffer: rolling window for TopSim/MI (keeps ~3 epochs ≈ 5000 obs)
+        self.long_observations: list[tuple[tuple, tuple, float]] = []
+        # Social-only observations (social agents age>100)
+        self.social_observations: list[tuple[tuple, tuple, float]] = []
         self.latest: dict = {}
 
-    def record(self, sound_seq: list[str], context_key: tuple, reward: float):
+    def record(self, sound_seq: list[str], context_key: tuple, reward: float,
+               agent_type: str = "", agent_age: int = 0):
         """Called each tick for each sound event with server-side context."""
-        self.observations.append((tuple(sound_seq), context_key, reward))
+        obs = (tuple(sound_seq), context_key, reward)
+        self.observations.append(obs)
+        self.long_observations.append(obs)
+        if agent_type == "social" and agent_age > 100:
+            self.social_observations.append(obs)
 
     def compute(self, tick: int, epoch: int, lobsters,
-                csr_heard: int = 0, csr_successes: int = 0) -> dict:
+                csr_heard: int = 0, csr_successes: int = 0,
+                csr_social_heard: int = 0, csr_social_successes: int = 0,
+                pca_events: int = 0, pca_successes: int = 0,
+                cic_heard_events: int = 0, cic_heard_moved: int = 0,
+                cic_silent_events: int = 0, cic_silent_moved: int = 0,
+                colony_count: int = 0, avg_colony_size: float = 0,
+                food_trail_cells: int = 0, danger_trail_cells: int = 0) -> dict:
         """Compute all metrics. Called every 100 ticks."""
         csr = round(csr_successes / csr_heard, 4) if csr_heard > 0 else 0.0
+        social_csr = round(csr_social_successes / csr_social_heard, 4) if csr_social_heard > 0 else 0.0
+        pca = round(pca_successes / pca_events, 4) if pca_events > 0 else 0.0
+
+        # CIC: behavioral delta = P(move_toward_rift | heard) - P(move_toward_rift | silent)
+        rate_heard = cic_heard_moved / cic_heard_events if cic_heard_events > 0 else 0.0
+        rate_silent = cic_silent_moved / cic_silent_events if cic_silent_events > 0 else 0.0
+        cic = round(rate_heard - rate_silent, 4)
+
         result = {
             "tick": tick,
             "epoch": epoch,
             "vocabulary_size": self._vocab_size(),
-            "top_sim": self._topographic_similarity(),
+            "top_sim": self._topographic_similarity(use_long=True),
             "pos_dis": self._positional_disentanglement(),
             "bos_dis": self._bag_of_symbols_disentanglement(),
-            "mutual_info": self._mutual_information(),
+            "mutual_info": self._mutual_information(use_long=True),
             "economic_delta": self._economic_delta(lobsters),
             "csr": csr,
             "csr_heard": csr_heard,
             "csr_successes": csr_successes,
+            "social_csr": social_csr,
+            "social_csr_heard": csr_social_heard,
+            "social_csr_successes": csr_social_successes,
+            "pca": pca,
+            "pca_events": pca_events,
+            "pca_successes": pca_successes,
+            "cic": cic,
+            "cic_heard_events": cic_heard_events,
+            "cic_heard_moved": cic_heard_moved,
+            "cic_silent_events": cic_silent_events,
+            "cic_silent_moved": cic_silent_moved,
+            "social_mi": self._social_mutual_information(),
+            "per_type_credits": self._per_type_credits(lobsters),
+            "colony_count": colony_count,
+            "avg_colony_size": round(avg_colony_size, 1),
+            "food_trail_cells": food_trail_cells,
+            "danger_trail_cells": danger_trail_cells,
         }
         self.latest = result
 
         # Append to JSONL file
         with open(self.log_file, "a") as f:
             f.write(json.dumps(result) + "\n")
+
+        # Short buffer: per-epoch reset for PosDis/BosDis
+        self.observations.clear()
+        self.social_observations.clear()
+        # Long buffer: rolling window ~5000 for TopSim/MI (≈3 epochs)
+        max_long = 5000
+        if len(self.long_observations) > max_long:
+            self.long_observations = self.long_observations[-max_long:]
 
         return result
 
@@ -66,15 +114,16 @@ class MetricsLogger:
                 vocab += 1
         return vocab
 
-    def _topographic_similarity(self) -> float:
+    def _topographic_similarity(self, use_long: bool = False) -> float:
         """Spearman correlation between meaning distances and signal distances.
         Sample up to 200 (meaning, signal) pairs."""
-        if len(self.observations) < 10:
+        obs = self.long_observations if use_long else self.observations
+        if len(obs) < 10:
             return 0.0
 
         # Build (context_key, sound_seq) pairs — deduplicate by most common mapping
         ctx_to_seq: dict[tuple, dict[tuple, int]] = defaultdict(lambda: defaultdict(int))
-        for seq, ctx, _ in self.observations:
+        for seq, ctx, _ in obs:
             ctx_to_seq[ctx][seq] += 1
 
         pairs = []
@@ -197,9 +246,10 @@ class MetricsLogger:
 
         return round(sum(scores) / len(scores), 4) if scores else 0.0
 
-    def _mutual_information(self) -> float:
+    def _mutual_information(self, use_long: bool = False) -> float:
         """MI(signal; context) from joint frequency table."""
-        if len(self.observations) < 10:
+        obs = self.long_observations if use_long else self.observations
+        if len(obs) < 10:
             return 0.0
 
         joint: dict[tuple, int] = defaultdict(int)
@@ -207,7 +257,36 @@ class MetricsLogger:
         ctx_count: dict[tuple, int] = defaultdict(int)
         total = 0
 
-        for seq, ctx, _ in self.observations:
+        for seq, ctx, _ in obs:
+            joint[(seq, ctx)] += 1
+            sig_count[seq] += 1
+            ctx_count[ctx] += 1
+            total += 1
+
+        if total == 0:
+            return 0.0
+
+        mi = 0.0
+        for (s, c), count in joint.items():
+            p_sc = count / total
+            p_s = sig_count[s] / total
+            p_c = ctx_count[c] / total
+            if p_s > 0 and p_c > 0 and p_sc > 0:
+                mi += p_sc * math.log2(p_sc / (p_s * p_c))
+
+        return round(mi, 4)
+
+    def _social_mutual_information(self) -> float:
+        """MI(signal; context) only from social agents with age>100."""
+        if len(self.social_observations) < 10:
+            return 0.0
+
+        joint: dict[tuple, int] = defaultdict(int)
+        sig_count: dict[tuple, int] = defaultdict(int)
+        ctx_count: dict[tuple, int] = defaultdict(int)
+        total = 0
+
+        for seq, ctx, _ in self.social_observations:
             joint[(seq, ctx)] += 1
             sig_count[seq] += 1
             ctx_count[ctx] += 1
@@ -248,8 +327,26 @@ class MetricsLogger:
 
         return round(avg_speakers - avg_silent, 2)
 
+    def _per_type_credits(self, lobsters) -> dict[str, float]:
+        """Average net credits per agent type."""
+        if not lobsters:
+            return {}
+        by_type: dict[str, list[float]] = {}
+        for lob in lobsters.values():
+            atype = lob.agent_type or "unknown"
+            if atype not in by_type:
+                by_type[atype] = []
+            by_type[atype].append(lob.credits_earned - lob.credits_spent)
+        return {
+            atype: round(sum(vals) / len(vals), 1)
+            for atype, vals in by_type.items()
+            if vals
+        }
+
     def reset(self):
         self.observations.clear()
+        self.long_observations.clear()
+        self.social_observations.clear()
         self.latest = {}
 
 

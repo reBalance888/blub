@@ -2,7 +2,7 @@
 
 ocean:
   size: 100
-  tick_interval: 1.0
+  tick_interval: 0.1
   density_constant: 7
   active_zone_min: 15
 
@@ -25,22 +25,32 @@ rifts:
       spawn_weight: 0.3
 
 predators:
-  base_spawn_rate: 0.0008
-  density_exponent: 1.5
+  base_spawn_rate: 0.30
+  sigmoid_K: 12
   kill_radius: 1
+  kill_prob_base: 0.8
+  confusion_enabled: true
+  rift_zone_reduction: 0.6
+  failed_attack_penalty: 5
   speed: 1.0
   lifetime: 30
   zone_size: 10
-  grace_period: 60
+  grace_period: 30
 
 economy:
   total_supply: 1000000000
-  epoch_length_ticks: 600
+  epoch_length_ticks: 100
   simulated_epoch_pool: 500000
-  sound_credit_cost: 1
-  death_timeout: 30
-  death_credit_penalty: 0.1
+  sound_credit_cost: 2
+  sound_cost_2: 5
+  death_timeout: 20
+  death_credit_penalty: 0.05
   starting_balance: 50000
+
+communication:
+  max_message_length: 2
+  channel_noise_rate: 0.10
+  listener_feedback_frac: 0.30   # speaker gets 30% of listener's rift reward
 
 tiers:
   shrimp:
@@ -67,34 +77,37 @@ sounds:
   - zzzub
   - frrr
   - tink
-  - bloop
-  - squee
-  - drrrn
-  - gulp
-  - hiss
-  - bonk
-  - splat
-  - chirr
-  - wub
-  - clonk
-  - fizz
-  - grumble
-  - ping
-  - splish
-  - croak
-  - zzzt
-  - plop
-  - whirr
-  - snap
-  - burble
 
 agents:
   agent_lifetime: 3000  # ticks (~5 epochs) before retirement & naive replacement
+
+pheromones:
+  decay_rate: 0.95          # per-tick multiplier (trail lasts ~60 ticks = 6 sec)
+  diffusion_rate: 0.1       # spread to 4 neighbors per tick
+  max_intensity: 10.0
+  food_deposit_scale: 0.02  # reward → deposit multiplier
+  danger_deposit: 3.0       # fixed deposit on death
+
+colonies:
+  formation_threshold: 4    # min agents to form
+  formation_radius: 3       # max distance between members
+  persistence_ticks: 30     # ticks as candidate before promotion
+  reward_bonus: 1.2         # 20% rift reward bonus for members
+  max_colonies: 5
 
 ablation:
   turnover: true       # agent retirement/replacement
   sound_cost: true     # credits deducted for speaking
   bayesian: true       # Bayesian comprehension in social agents
+  inheritance_frac: 0.40  # how much to blend imported knowledge
+
+cultural_cache:
+  inheritance_frac: 0.40
+  cache_decay_rate: 0.98
+  min_agent_age_to_contribute: 300
+  contribution_interval: 200
+  noise_std: 0.10
+  partial_reset_retention: 0.20
 
 auto_balance:
   enabled: true

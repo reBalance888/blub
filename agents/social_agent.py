@@ -167,6 +167,127 @@ class ProductionPolicy:
         return indexed[:n]
 
 
+class GaussianProductionPolicy:
+    """Gaussian ordinal policy: each position outputs a scalar μ∈[0,1],
+    sound sampled from discretized Gaussian centered at μ*(n_sounds-1).
+    Topographic similarity is built into the architecture — nearby contexts
+    automatically produce nearby sounds.
+
+    Only 4 parameters per position (vs 40 in categorical policy).
+    """
+
+    MUTATION_RATE = 0.05
+    MAX_NORM = 8.0
+    SIGMA = 1.8  # Gaussian spread in sound space (wider → more diversity → PosDis)
+
+    def __init__(self, n_sounds: int = 10, n_dims: int = 3, max_len: int = 2,
+                 lr: float = 0.03):
+        self.n_sounds = n_sounds
+        self.n_dims = n_dims
+        self.max_len = max_len
+        self.lr = lr
+        # Structured init: W @ normalized_ctx → sigmoid → [0,1] → sound index.
+        # Position 0: high spatial → HIGH sounds (positive gradient)
+        # Position 1: high social → LOW sounds (flipped gradient)
+        # This creates position-specific encoding → high PosDis + high TopSim.
+        self.W: list[list[float]] = []
+        for pos in range(max_len):
+            if pos == 0:
+                self.W.append([1.5, 0.5, 0.3, 0.0])
+            else:
+                # Flipped gradient: high values → low sounds, centered by bias=1.0
+                self.W.append([-1.5, -0.5, -0.3, 1.0])
+        self.baseline: list[float] = [0.0] * max_len
+
+    def split_context(self, full_ctx: tuple) -> list[tuple]:
+        return [
+            (full_ctx[0], full_ctx[1], full_ctx[2]),
+            (full_ctx[3], full_ctx[4], full_ctx[5]),
+        ]
+
+    def _normalize(self, sub_ctx: tuple) -> list[float]:
+        return [v / self.MAX_NORM for v in sub_ctx] + [1.0]
+
+    def _forward_mu(self, pos: int, sub_ctx: tuple) -> float:
+        """Compute μ = sigmoid(W @ x) ∈ [0, 1]."""
+        x = self._normalize(sub_ctx)
+        z = sum(self.W[pos][j] * x[j] for j in range(len(x)))
+        # Clip to prevent overflow
+        z = max(-10.0, min(10.0, z))
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def _sound_probs(self, mu: float) -> list[float]:
+        """Discretized Gaussian: P(sound=i) ∝ exp(-(i - μ*(n-1))² / 2σ²)."""
+        center = mu * (self.n_sounds - 1)
+        sig2 = 2.0 * self.SIGMA * self.SIGMA
+        probs = [math.exp(-(i - center) ** 2 / sig2) for i in range(self.n_sounds)]
+        total = sum(probs)
+        return [p / total for p in probs] if total > 0 else [1.0 / self.n_sounds] * self.n_sounds
+
+    def produce(self, full_ctx: tuple) -> list[int]:
+        sub_ctxs = self.split_context(full_ctx)
+        message = []
+        for pos in range(self.max_len):
+            if random.random() < self.MUTATION_RATE:
+                message.append(random.randint(0, self.n_sounds - 1))
+                continue
+            mu = self._forward_mu(pos, sub_ctxs[pos])
+            probs = self._sound_probs(mu)
+            r = random.random()
+            cumulative = 0.0
+            chosen = self.n_sounds - 1
+            for i, p in enumerate(probs):
+                cumulative += p
+                if r <= cumulative:
+                    chosen = i
+                    break
+            message.append(chosen)
+        return message
+
+    def reinforce(self, full_ctx: tuple, message: list[int], rewards: list[float]):
+        """REINFORCE for Gaussian policy.
+        Gradient: push μ toward chosen sound if advantage > 0."""
+        sub_ctxs = self.split_context(full_ctx)
+        for pos in range(min(len(message), self.max_len)):
+            reward = rewards[pos] if pos < len(rewards) else rewards[-1]
+            self.baseline[pos] += 0.01 * (reward - self.baseline[pos])
+            advantage = reward - self.baseline[pos]
+            if abs(advantage) < 0.01:
+                continue
+
+            sub_ctx = sub_ctxs[pos]
+            x = self._normalize(sub_ctx)
+            mu = self._forward_mu(pos, sub_ctx)
+            action = message[pos]
+
+            # Target mu for the chosen sound
+            target_mu = action / (self.n_sounds - 1)
+            # Gradient of log-likelihood: d/dW ∝ (target_mu - mu) * mu * (1-mu) * x
+            # (derivative of sigmoid output w.r.t. pre-sigmoid input)
+            grad_mu = (target_mu - mu) * mu * (1 - mu)
+
+            for j in range(len(x)):
+                self.W[pos][j] += self.lr * advantage * grad_mu * x[j]
+
+    def decay_all(self):
+        """Gentle weight decay."""
+        for pos in range(self.max_len):
+            for j in range(len(self.W[pos])):
+                self.W[pos][j] *= 0.9995
+
+    def top_sounds(self, ctx_key: tuple, n: int = 3) -> list[tuple[int, float]]:
+        """Return top sounds for a context (for logging)."""
+        sub_ctxs = self.split_context(ctx_key)
+        mu = self._forward_mu(0, sub_ctxs[0])
+        probs = self._sound_probs(mu)
+        indexed = sorted(enumerate(probs), key=lambda x: -x[1])
+        return indexed[:n]
+
+
+# Keep old NeuralProductionPolicy for backward compat reference
+NeuralProductionPolicy = GaussianProductionPolicy
+
+
 class Comprehension:
     """Bayesian comprehension: tracks P(context | sound heard).
     Handles both individual sounds and multi-sound sequences."""
@@ -256,13 +377,19 @@ class SocialAgent(BlubAgent):
         super().__init__(*args, **kwargs)
         self.ablation = ablation or {}
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
-        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.97)
+        self.production = GaussianProductionPolicy(
+            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03
+        )
         self.comprehension = Comprehension()
         self.last_ctx: tuple = (0,) * 6
         self.last_sound_idx: int | None = None
-        self.last_sound_seq: tuple = ()
+        self.last_sound_seq: list[int] = []
         self.last_credits: float = 0.0
+        self.last_group_hits: int = 0
+        self.last_deaths: int = 0
         self.decay_counter: int = 0
+        # Topographic tracking: recent (message_tuple, ctx_key) pairs
+        self._msg_history: list[tuple[tuple, tuple]] = []
 
     @staticmethod
     def _heading(relative: list[int]) -> int:
@@ -293,34 +420,131 @@ class SocialAgent(BlubAgent):
 
         return [d0, d1, d2, d3, d4, d5]
 
-    def _sequence_length(self, ctx_key: tuple) -> int:
-        """Determine how many sounds to produce based on context complexity.
-        Simple contexts (open water) → 1 sound.
-        Rich contexts (near specific rift type + crowded + heading) → 2-3 sounds.
-        This enables compositionality: position in sequence carries meaning."""
-        complexity = 0
-        # dim 0: near rift (bin 0 = very close)
-        if ctx_key[0] == 0:
-            complexity += 1
-        # dim 2: rift type known (gold=3, silver=2, copper=1)
-        if ctx_key[2] > 0:
-            complexity += 1
-        # dim 3: crowded (high bin)
-        if ctx_key[3] >= 2:
-            complexity += 1
-        # dim 4: predator nearby
-        if ctx_key[4] >= 1:
-            complexity += 1
-        # 0-1 complexity → 1 sound, 2 → 2 sounds, 3+ → 3 sounds
-        if complexity <= 1:
-            return 1
-        if complexity == 2:
-            return 2
-        return 3
+    def export_knowledge(self) -> dict:
+        """Serialize neural weights + comprehension counts for deposit."""
+        prod = {
+            "W": self.production.W,
+            "baseline": self.production.baseline,
+        }
+        comp: dict[str, dict[str, int]] = {}
+        for sidx, ctx_counts in self.comprehension.counts.items():
+            comp[str(sidx)] = {str(k): v for k, v in ctx_counts.items()}
+        return {"production": prod, "comprehension": comp}
+
+    def import_knowledge(self, data: dict, frac: float = 0.40):
+        """Import weights + comprehension, blending with current."""
+        prod = data.get("production", {})
+        imported_W = prod.get("W")
+        if imported_W and len(imported_W) == self.production.max_len:
+            for pos in range(self.production.max_len):
+                w = self.production.W[pos]
+                iw = imported_W[pos]
+                # Handle both flat (Gaussian: [w0,w1,w2,bias]) and nested (Neural: [[...], ...]) formats
+                if isinstance(w, list) and w and not isinstance(w[0], list):
+                    # Flat format: Gaussian policy W[pos] = [w0, w1, w2, bias]
+                    for j in range(min(len(w), len(iw) if isinstance(iw, list) else 0)):
+                        try:
+                            val = iw[j] if not isinstance(iw[j], list) else iw[j][0]
+                            self.production.W[pos][j] = w[j] * (1 - frac) + val * frac
+                        except (IndexError, TypeError):
+                            pass
+                else:
+                    # Nested format: Neural policy W[pos] = [[...], ...]
+                    for i in range(min(len(w), len(iw))):
+                        for j in range(min(len(w[i]), len(iw[i]))):
+                            try:
+                                self.production.W[pos][i][j] = (
+                                    w[i][j] * (1 - frac) + iw[i][j] * frac
+                                )
+                            except (IndexError, TypeError):
+                                pass
+
+        comp = data.get("comprehension", {})
+        for sidx_str, ctx_counts in comp.items():
+            try:
+                sidx = int(sidx_str)
+            except ValueError:
+                continue
+            if sidx not in self.comprehension.counts:
+                self.comprehension.counts[sidx] = {}
+            for ctx_str, count in ctx_counts.items():
+                try:
+                    ctx_key = tuple(int(x.strip()) for x in ctx_str.strip("()").split(",") if x.strip())
+                except (ValueError, AttributeError):
+                    continue
+                old = self.comprehension.counts[sidx].get(ctx_key, 0)
+                self.comprehension.counts[sidx][ctx_key] = old + int(count * frac)
+        n_w = sum(len(row) for pos_w in (imported_W or []) for row in pos_w)
+        n_comp = sum(len(v) for v in comp.values())
+        print(f"[{self.name}] Imported knowledge: {n_w} weights, {n_comp} comp entries (frac={frac})")
+
+    def partial_reset(self, retention: float = 0.20):
+        """Partial reset: shrink weights toward zero, keep direction."""
+        for pos in range(self.production.max_len):
+            w = self.production.W[pos]
+            if isinstance(w, list) and w and not isinstance(w[0], list):
+                # Flat format (Gaussian policy)
+                for j in range(len(w)):
+                    self.production.W[pos][j] *= retention
+            else:
+                # Nested format (Neural policy)
+                for i in range(len(w)):
+                    for j in range(len(w[i])):
+                        self.production.W[pos][i][j] *= retention
+            self.production.baseline[pos] *= retention
+        # Keep comprehension counts scaled down
+        for sidx in self.comprehension.counts:
+            for ctx_key in self.comprehension.counts[sidx]:
+                self.comprehension.counts[sidx][ctx_key] = max(
+                    1, int(self.comprehension.counts[sidx][ctx_key] * retention)
+                )
+        self.ctx_discoverer.count = 0
+        self.last_credits = 0.0
+        self.decay_counter = 0
+        print(f"[{self.name}] Partial reset (retention={retention})")
+
+    def on_bootstrap(self, data: dict):
+        """Called by base_agent after connect — import cultural cache (oblique transmission)."""
+        self.import_knowledge(data, frac=self.ablation.get("inheritance_frac", 0.40))
+
+    def on_mentor(self, data: dict):
+        """Horizontal transmission: blend 15% from nearest experienced social agent."""
+        self.import_knowledge(data, frac=0.15)
+
+    async def on_death(self):
+        """Deposit knowledge to cultural cache when killed by predator."""
+        try:
+            knowledge = self.export_knowledge()
+            result = await self.deposit_knowledge(knowledge)
+            print(f"[{self.name}] Death deposit: {result.get('message', 'ok')}")
+        except Exception as e:
+            print(f"[{self.name}] Death deposit failed: {e}")
+
+    async def on_pre_retire(self):
+        """Deposit knowledge before retirement, then partial reset."""
+        try:
+            knowledge = self.export_knowledge()
+            result = await self.deposit_knowledge(knowledge)
+            print(f"[{self.name}] Pre-retire deposit: {result.get('message', 'ok')}")
+        except Exception as e:
+            print(f"[{self.name}] Pre-retire deposit failed: {e}")
+        self.partial_reset(retention=0.20)
+
+    async def periodic_check(self, state: dict):
+        """Every contribution_interval ticks, deposit knowledge if old enough."""
+        interval = 200  # from config cultural_cache.contribution_interval
+        min_age = 300   # from config cultural_cache.min_agent_age_to_contribute
+        if self.local_age > 0 and self.local_age % interval == 0 and self.local_age >= min_age:
+            try:
+                knowledge = self.export_knowledge()
+                result = await self.deposit_knowledge(knowledge)
+                print(f"[{self.name}] Periodic deposit at local_age={self.local_age}: {result.get('message', 'ok')}")
+            except Exception as e:
+                print(f"[{self.name}] Periodic deposit failed: {e}")
 
     def on_retired(self):
-        """Turnover: reset all language state when retired by server."""
-        self.reset_language()
+        """Turnover: partial reset (on_pre_retire already deposited)."""
+        pass
 
     def on_sounds_heard(self, sounds_events: list):
         """Update comprehension when sounds are received (individual + sequences)."""
@@ -345,12 +569,33 @@ class SocialAgent(BlubAgent):
         raw = self._extract_raw(state)
         ctx_key = self.ctx_discoverer.get_context(raw)
 
-        # Reinforce last action based on credit delta
+        # Differential reinforcement: pos0=spatial (credit delta), pos1=social (group/survival)
         current_credits = state.get("my_net_credits", 0)
         delta = current_credits - self.last_credits
-        if self.last_sound_idx is not None and delta > 0:
-            self.production.reinforce(self.last_ctx, self.last_sound_idx, delta)
+
+        current_group = state.get("group_hits", 0)
+        current_deaths = state.get("deaths_this_epoch", 0)
+        group_delta = current_group - self.last_group_hits
+        survived_predator = len(state.get("nearby_predators", [])) > 0 and state.get("alive", True)
+
+        if self.last_sound_seq:
+            # pos0: spatial reward from rift credits
+            pos0_reward = max(0, delta)
+            # pos1: social reward from group coordination + predator survival
+            pos1_reward = group_delta * 5.0  # group hits are valuable
+            if survived_predator:
+                pos1_reward += 3.0  # surviving near predator rewards social encoding
+            if current_deaths > self.last_deaths:
+                pos1_reward = 0  # died = no social reward
+            if pos0_reward > 0 or pos1_reward > 0:
+                self.production.reinforce(
+                    self.last_ctx, self.last_sound_seq,
+                    [pos0_reward, pos1_reward],
+                )
+
         self.last_credits = current_credits
+        self.last_group_hits = current_group
+        self.last_deaths = current_deaths
 
         # Decay weights every 50 ticks
         self.decay_counter += 1
@@ -360,18 +605,10 @@ class SocialAgent(BlubAgent):
 
         # Log every 100 ticks
         if state["tick"] % 100 == 0:
-            active_contexts = len(self.production.weights)
-            top_ctx = sorted(
-                self.production.weights.keys(),
-                key=lambda k: max(self.production.weights[k]),
-                reverse=True,
-            )[:3] if self.production.weights else []
-            top_info = {}
-            for ck in top_ctx:
-                top_s = self.production.top_sounds(ck, 1)
-                if top_s:
-                    top_info[str(ck)] = f"{SOUNDS[top_s[0][0]]}({top_s[0][1]:.0%})"
-            print(f"[{self.name}] tick={state['tick']} contexts={active_contexts} top={top_info}")
+            top = self.production.top_sounds(ctx_key, n=3)
+            top_info = {SOUNDS[i]: f"{p:.0%}" for i, p in top}
+            w_info = [f"{w:.2f}" for w in self.production.W[0]]
+            print(f"[{self.name}] tick={state['tick']} top={top_info} W0={w_info}")
 
         speak: list[str] = []
 
@@ -381,26 +618,34 @@ class SocialAgent(BlubAgent):
         near_predator = bool(state.get("nearby_predators"))
 
         if near_rift or near_predator or random.random() < 0.3:
-            # Multi-sound production: context complexity determines sequence length
-            # Rich contexts (rift type, crowded, heading) → 2-3 sounds for compositionality
-            seq_len = self._sequence_length(ctx_key)
-            sound_indices = []
-            for _ in range(seq_len):
-                idx = self.production.produce(ctx_key)
-                sound_indices.append(idx)
+            # Compositional production: always 2-sound message
+            sound_indices = self.production.produce(ctx_key)
             speak = [SOUNDS[i] for i in sound_indices]
-            self.last_sound_idx = sound_indices[0]  # primary sound for reinforcement
-            self.last_sound_seq = tuple(sound_indices)
-            self.last_ctx = ctx_key
-        else:
-            self.last_sound_idx = None
-            self.last_sound_seq = ()
+            self.last_sound_idx = sound_indices[0]
+            self.last_sound_seq = sound_indices
             self.last_ctx = ctx_key
 
-        # Movement: flee predators > respond to heard rift sounds > go to rift > wander
+            # Topographic bonus: reward when context→sound mapping is smooth
+            # (close contexts → close sounds, distant contexts → distant sounds)
+            msg_t = tuple(sound_indices)
+            self._msg_history.append((msg_t, ctx_key))
+            if len(self._msg_history) > 200:
+                self._msg_history.pop(0)
+            if len(self._msg_history) >= 15:
+                topo = self._topographic_bonus(ctx_key, sound_indices)
+                if abs(topo) > 0.05:
+                    self.production.reinforce(ctx_key, sound_indices, [topo, topo])
+        else:
+            self.last_sound_idx = None
+            self.last_sound_seq = []
+            self.last_ctx = ctx_key
+
+        # Movement priority: flee predators > heard rift sounds > visible rift >
+        #                    follow food pheromone > avoid danger pheromone > random walk
         if near_predator:
             pred = state["nearby_predators"][0]
             dx, dy = pred["relative"]
+            # Also factor in danger pheromone — stronger flee if danger trails nearby
             move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
             return {"move": move, "speak": speak, "act": None}
 
@@ -447,19 +692,76 @@ class SocialAgent(BlubAgent):
             else:
                 move = "stay"
         else:
-            move = random.choice(["north", "south", "east", "west"])
+            # Priority 4: follow food pheromone gradient
+            food_trails = state.get("nearby_food_trails", [])
+            if food_trails:
+                best = max(food_trails, key=lambda t: t["intensity"])
+                dx, dy = best["dx"], best["dy"]
+                if abs(dx) >= abs(dy):
+                    move = "east" if dx > 0 else "west"
+                else:
+                    move = "south" if dy > 0 else "north"
+            else:
+                # Priority 5: avoid danger pheromone zones
+                danger = state.get("nearby_danger_trails", [])
+                if danger:
+                    worst = max(danger, key=lambda t: t["intensity"])
+                    dx, dy = worst["dx"], worst["dy"]
+                    # Move AWAY from strongest danger
+                    if abs(dx) >= abs(dy):
+                        move = "west" if dx > 0 else "east"
+                    else:
+                        move = "north" if dy > 0 else "south"
+                else:
+                    move = random.choice(["north", "south", "east", "west"])
 
         return {"move": move, "speak": speak, "act": None}
+
+    def _topographic_bonus(self, ctx_key: tuple, sound_indices: list[int]) -> float:
+        """Reward for topographic consistency: close contexts → close sounds.
+        Directly incentivizes TopSim at the individual agent level."""
+        bonus = 0.0
+        n = 0
+        for prev_msg, prev_ctx in self._msg_history[-50:]:
+            if prev_ctx == ctx_key:
+                continue  # skip self-comparisons
+            # Meaning distance: normalized Hamming
+            m_dist = sum(1 for a, b in zip(ctx_key, prev_ctx) if a != b) / len(ctx_key)
+            # Signal distance: ordinal distance per position, normalized
+            if len(prev_msg) != len(sound_indices):
+                continue
+            s_dist = sum(abs(a - b) for a, b in zip(sound_indices, prev_msg)) / (
+                (self.production.n_sounds - 1) * len(sound_indices)
+            )
+            # Reward correlated distances (close→close, far→far)
+            # Penalize anti-correlation (close→far, far→close)
+            # Magnitudes ~20-50% of typical main reward for meaningful gradient
+            if m_dist < 0.35:  # close meanings
+                if s_dist < 0.25:
+                    bonus += 2.0  # close sounds → strong reward
+                elif s_dist > 0.6:
+                    bonus -= 1.5  # distant sounds → penalty
+            elif m_dist > 0.65:  # distant meanings
+                if s_dist > 0.6:
+                    bonus += 1.0  # distant sounds → moderate reward
+                elif s_dist < 0.25:
+                    bonus -= 0.5  # close sounds for distant meanings → small penalty
+            n += 1
+        return bonus / max(n, 1)
 
     def reset_language(self):
         """Reset all learned language state (for turnover/rebirth as naive)."""
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
-        self.production = ProductionPolicy(n_sounds=len(SOUNDS), init_weight=1.0, decay=0.97)
+        self.production = GaussianProductionPolicy(
+            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03
+        )
         self.comprehension = Comprehension()
         self.last_ctx = (0,) * 6
         self.last_sound_idx = None
-        self.last_sound_seq = ()
+        self.last_sound_seq = []
         self.last_credits = 0.0
+        self.last_group_hits = 0
+        self.last_deaths = 0
         self.decay_counter = 0
         print(f"[{self.name}] Language state RESET (turnover rebirth)")
 

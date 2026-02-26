@@ -13,6 +13,9 @@ from .predator import PredatorManager, Predator
 from .economy import EconomyManager
 from .epoch import EpochManager
 from .metrics import MetricsLogger
+from .cultural_cache import CulturalCache
+from .pheromone import PheromoneMap
+from .colony import ColonyManager
 
 
 @dataclass
@@ -34,6 +37,7 @@ class Lobster:
     speaking: list = field(default_factory=list)  # sounds this tick
     age: int = 0  # ticks since spawn (for turnover)
     retired: bool = False  # flagged for replacement
+    reward_this_tick: float = 0.0  # rift reward earned THIS tick (for pheromone deposit)
 
 
 class Ocean:
@@ -72,11 +76,35 @@ class Ocean:
         self.epoch_mgr = EpochManager(config)
         self.metrics_logger = MetricsLogger()
         self.latest_metrics: dict = {}
+        self.cultural_cache = CulturalCache(config)
+        self.pheromone_map = PheromoneMap(config)
+        self.colony_mgr = ColonyManager(config)
 
-        # CSR tracking: {agent_id: (heard_tick, agent_x, agent_y)}
-        self._csr_pending: dict[str, tuple[int, int, int]] = {}
+        # CSR tracking: {agent_id: (heard_tick, agent_x, agent_y, speaker_type, listener_type)}
+        self._csr_pending: dict[str, tuple[int, int, int, str, str]] = {}
         self._csr_heard_events: int = 0
         self._csr_successes: int = 0
+        self._csr_social_heard: int = 0
+        self._csr_social_successes: int = 0
+
+        # PCA tracking: social→social with rift type matching
+        # {listener_id: (heard_tick, speaker_rift_type)}
+        self._pca_pending: dict[str, tuple[int, str]] = {}
+        self._pca_events: int = 0
+        self._pca_successes: int = 0
+
+        # CIC (Causal Influence of Communication) tracking
+        # Behavioral delta: heard-sound social agents vs silent social agents moving toward rifts
+        # {agent_id: (tick, agent_x, agent_y)}
+        self._cic_heard_pending: dict[str, tuple[int, int, int]] = {}
+        self._cic_silent_pending: dict[str, tuple[int, int, int]] = {}
+        self._cic_heard_events: int = 0
+        self._cic_heard_moved: int = 0  # moved toward rift after hearing
+        self._cic_silent_events: int = 0
+        self._cic_silent_moved: int = 0  # moved toward rift without hearing
+
+        # Listener feedback: {listener_id: (speaker_id, tick_heard)}
+        self._heard_from: dict[str, tuple[str, int]] = {}
 
         # Init first epoch rifts (within active zone)
         zone_min, zone_max = self._active_zone_bounds()
@@ -151,6 +179,10 @@ class Ocean:
         self.tick += 1
         self.current_sounds = []
 
+        # Reset per-tick reward tracking
+        for lob in self.lobsters.values():
+            lob.reward_this_tick = 0.0
+
         # 1. Process movements
         self._process_movements()
 
@@ -159,6 +191,14 @@ class Ocean:
 
         # 3. Rift rewards (group bonus)
         self._process_rift_rewards()
+
+        # 3a. Pheromone deposits from rift rewards (food trails)
+        food_scale = self.config.get("pheromones", {}).get("food_deposit_scale", 0.02)
+        for lob in self.lobsters.values():
+            if lob.alive and lob.reward_this_tick > 0:
+                deposit_amt = min(lob.reward_this_tick * food_scale, 2.0)
+                if deposit_amt > 0.01:
+                    self.pheromone_map.deposit(lob.x, lob.y, "food", deposit_amt)
 
         # 3b. Decrement grace ticks & increment age
         turnover_enabled = self.config.get("ablation", {}).get("turnover", True)
@@ -176,16 +216,29 @@ class Ocean:
         self._track_csr_heard()
 
         # 4. Predator spawns & movement
-        self.predator_mgr.process_tick(self._get_lobster_positions(), self.size)
+        rift_positions = [(r.x, r.y) for r in self.rift_mgr.active_rifts]
+        self.predator_mgr.process_tick(self._get_lobster_positions(), self.size, rift_positions)
 
         # 5. Predator kills
-        self._process_predator_kills()
+        kill_positions = self._process_predator_kills()
+
+        # 5b. Danger pheromone at kill sites
+        danger_amt = self.config.get("pheromones", {}).get("danger_deposit", 3.0)
+        for kx, ky in kill_positions:
+            self.pheromone_map.deposit(kx, ky, "danger", danger_amt)
 
         # 6. Rift depletion & respawn
         self.rift_mgr.tick_rifts(self.tick)
 
         # 7. Death timers
         self._process_death_timers()
+
+        # 7b. Pheromone decay + diffusion
+        self.pheromone_map.tick()
+
+        # 7c. Colony detection
+        rift_positions = [(r.x, r.y, r.id) for r in self.rift_mgr.active_rifts]
+        self.colony_mgr.tick(self.lobsters, rift_positions, self.tick)
 
         # 8. Check epoch end
         if self.epoch_mgr.tick():
@@ -197,9 +250,23 @@ class Ocean:
         # Log every 100 ticks
         if self.tick % 100 == 0:
             self._log_stats()
+            # Colony/pheromone stats for metrics
+            n_colonies = len(self.colony_mgr.colonies)
+            avg_col_size = (
+                sum(len(c.members) for c in self.colony_mgr.colonies.values()) / n_colonies
+                if n_colonies > 0 else 0
+            )
             self.latest_metrics = self.metrics_logger.compute(
                 self.tick, self.epoch_mgr.epoch, self.lobsters,
                 self._csr_heard_events, self._csr_successes,
+                self._csr_social_heard, self._csr_social_successes,
+                self._pca_events, self._pca_successes,
+                self._cic_heard_events, self._cic_heard_moved,
+                self._cic_silent_events, self._cic_silent_moved,
+                colony_count=n_colonies,
+                avg_colony_size=avg_col_size,
+                food_trail_cells=len(self.pheromone_map.food_trails),
+                danger_trail_cells=len(self.pheromone_map.danger_trails),
             )
 
     def _process_movements(self):
@@ -235,12 +302,19 @@ class Ocean:
                 lob.speaking = []
                 continue
 
-            # Validate and limit to 5
-            sounds = [s for s in raw_sounds if s in valid_sounds][:5]
+            # Validate and limit to max_message_length
+            max_msg = self.config.get("communication", {}).get("max_message_length", 2)
+            sounds = [s for s in raw_sounds if s in valid_sounds][:max_msg]
             lob.speaking = sounds
 
             if sounds:
-                cost = len(sounds) * sound_cost
+                # Superlinear cost: 2-sound messages cost more than 2×single
+                if len(sounds) == 1:
+                    cost = self.config["economy"]["sound_credit_cost"]
+                elif len(sounds) >= 2:
+                    cost = self.config["economy"].get("sound_cost_2", 5)
+                else:
+                    cost = 0
                 lob.credits_spent += cost
                 self.current_sounds.append({
                     "from": agent_id,
@@ -261,7 +335,8 @@ class Ocean:
                 # Record for metrics
                 ctx_key = self._get_speaker_context_key(lob, rift_radius)
                 reward = lob.credits_earned - lob.credits_spent
-                self.metrics_logger.record(sounds, ctx_key, reward)
+                self.metrics_logger.record(sounds, ctx_key, reward,
+                                           agent_type=lob.agent_type, agent_age=lob.age)
 
     def _process_rift_rewards(self):
         for rift in self.rift_mgr.active_rifts:
@@ -277,30 +352,82 @@ class Ocean:
             if total_drain > rift.richness:
                 reward = rift.richness / (n * drain_multiplier) if n > 0 else 0
                 total_drain = rift.richness
+            feedback_frac = self.config.get("communication", {}).get("listener_feedback_frac", 0.0)
             for lob in nearby:
                 # Newcomer discovery bonus: 2x rewards for first 50 ticks (Game Designer rec)
                 bonus = 2.0 if lob.age < 50 else 1.0
-                lob.credits_earned += reward * bonus
+                effective_reward = reward * bonus
+                # Colony bonus: members get extra rift rewards
+                colony = self.colony_mgr.get_colony_for(lob.id)
+                if colony:
+                    effective_reward *= self.colony_mgr.reward_bonus
+                    colony.total_reward += effective_reward
+                lob.credits_earned += effective_reward
+                lob.reward_this_tick += effective_reward
                 if n >= 2:
                     lob.group_hits += 1
+                # Listener feedback: if this lobster heard a sound recently, reward the speaker
+                if feedback_frac > 0 and lob.id in self._heard_from:
+                    speaker_id, heard_tick = self._heard_from[lob.id]
+                    if self.tick - heard_tick <= 10:
+                        speaker = self.lobsters.get(speaker_id)
+                        if speaker and speaker.alive:
+                            speaker.credits_earned += reward * bonus * feedback_frac
             rift.richness -= total_drain
 
-    def _process_predator_kills(self):
+    def _process_predator_kills(self) -> list[tuple[int, int]]:
+        """Process predator kills and return list of kill positions for danger pheromones."""
         kill_radius = self.config["predators"]["kill_radius"]
         death_timeout = self.config["economy"]["death_timeout"]
         death_penalty = self.config["economy"]["death_credit_penalty"]
+        kill_prob_base = self.config["predators"].get("kill_prob_base", 0.8)
+        confusion_enabled = self.config["predators"].get("confusion_enabled", True)
+        failed_penalty = self.config["predators"].get("failed_attack_penalty", 5)
+        kill_positions: list[tuple[int, int]] = []
 
         for pred in self.predator_mgr.active_predators:
-            for lob in self.lobsters.values():
-                if not lob.alive or lob.grace_ticks > 0:
-                    continue
-                dist = math.sqrt((lob.x - pred.x) ** 2 + (lob.y - pred.y) ** 2)
-                if dist <= kill_radius:
-                    lob.alive = False
-                    lob.death_timer = death_timeout
-                    lob.deaths_this_epoch += 1
-                    penalty = lob.credits_earned * death_penalty
-                    lob.credits_earned = max(0, lob.credits_earned - penalty)
+            # Find all targets in kill_radius
+            targets = [
+                lob for lob in self.lobsters.values()
+                if lob.alive and lob.grace_ticks <= 0
+                and math.sqrt((lob.x - pred.x) ** 2 + (lob.y - pred.y) ** 2) <= kill_radius
+            ]
+            if not targets:
+                continue
+
+            # Pick random target from those in range (dilution)
+            target = random.choice(targets)
+
+            # Find group: all alive lobsters within radius 3 of target
+            group = [
+                lob for lob in self.lobsters.values()
+                if lob.alive and abs(lob.x - target.x) <= 3 and abs(lob.y - target.y) <= 3
+            ]
+            group_size = max(1, len(group))
+
+            # Confusion effect: kill_prob = base / sqrt(group_size)
+            kill_prob = kill_prob_base
+            if confusion_enabled:
+                kill_prob = kill_prob_base / math.sqrt(group_size)
+
+            # Social bonus: 3+ social agents in group → extra 0.8x reduction
+            social_count = sum(1 for lob in group if lob.agent_type == "social")
+            if social_count >= 3:
+                kill_prob *= 0.8
+
+            if random.random() < kill_prob:
+                # Kill succeeds
+                kill_positions.append((target.x, target.y))
+                target.alive = False
+                target.death_timer = death_timeout
+                target.deaths_this_epoch += 1
+                penalty = target.credits_earned * death_penalty
+                target.credits_earned = max(0, target.credits_earned - penalty)
+            else:
+                # Failed attack: predator loses lifetime
+                pred.lifetime_remaining -= failed_penalty
+
+        return kill_positions
 
     def _process_death_timers(self):
         grace = self.config["predators"].get("grace_period", 60)
@@ -398,16 +525,20 @@ class Ocean:
             "types": epoch_summary,
         })
 
+        # Decay cultural cache
+        self.cultural_cache.epoch_decay()
+
     # ----- CSR (Communication Success Rate) -----
 
     def _track_csr_heard(self):
         """Track agents that heard sounds this tick for CSR measurement.
-        Success = agent heard a sound and moved within rift radius within 10 ticks."""
+        Success = agent heard a sound and moved within rift radius within 10 ticks.
+        Also tracks social-only CSR and PCA (rift type matching)."""
         rift_radius = self.config["rifts"]["radius"]
 
         # Check pending CSR events for success (moved near rift within 10 ticks)
         resolved = []
-        for agent_id, (heard_tick, hx, hy) in self._csr_pending.items():
+        for agent_id, (heard_tick, hx, hy, speaker_type, listener_type) in self._csr_pending.items():
             if self.tick - heard_tick > 10:
                 resolved.append(agent_id)
                 continue
@@ -419,25 +550,131 @@ class Ocean:
             for rift in self.rift_mgr.active_rifts:
                 if abs(lob.x - rift.x) <= rift_radius and abs(lob.y - rift.y) <= rift_radius:
                     self._csr_successes += 1
+                    if speaker_type == "social" and listener_type == "social":
+                        self._csr_social_successes += 1
                     resolved.append(agent_id)
                     break
         for aid in resolved:
             self._csr_pending.pop(aid, None)
 
+        # Check pending PCA events (social→social with rift type matching)
+        pca_resolved = []
+        for agent_id, (heard_tick, speaker_rift_type) in self._pca_pending.items():
+            if self.tick - heard_tick > 10:
+                pca_resolved.append(agent_id)
+                continue
+            lob = self.lobsters.get(agent_id)
+            if not lob or not lob.alive:
+                pca_resolved.append(agent_id)
+                continue
+            for rift in self.rift_mgr.active_rifts:
+                if abs(lob.x - rift.x) <= rift_radius and abs(lob.y - rift.y) <= rift_radius:
+                    # Check rift type match
+                    if rift.rift_type == speaker_rift_type:
+                        self._pca_successes += 1
+                    pca_resolved.append(agent_id)
+                    break
+        for aid in pca_resolved:
+            self._pca_pending.pop(aid, None)
+
+        # CIC: resolve pending heard/silent events (did agent move toward rift within 5 ticks?)
+        self._resolve_cic_events()
+
         # Register new heard events from this tick
+        # Also track which social agents heard sounds (for CIC)
+        social_heard_this_tick: set[str] = set()
         for snd in self.current_sounds:
             speaker_id = snd["from"]
+            speaker_lob = self.lobsters.get(speaker_id)
+            if not speaker_lob:
+                continue
+            speaker_type = speaker_lob.agent_type
             sx, sy = snd["pos"]
+
+            # Determine speaker's nearest rift type for PCA
+            speaker_rift_type = ""
+            if speaker_type == "social":
+                for rift in self.rift_mgr.active_rifts:
+                    if abs(speaker_lob.x - rift.x) <= rift_radius and abs(speaker_lob.y - rift.y) <= rift_radius:
+                        speaker_rift_type = rift.rift_type
+                        break
+
             for lob in self.lobsters.values():
                 if lob.id == speaker_id or not lob.alive:
+                    continue
+                # Skip very young agents for CSR (noisy data)
+                if lob.age <= 100:
                     continue
                 tier_info = self.get_tier_info(self.get_tier(lob))
                 sound_range = tier_info["sound_range"]
                 if abs(lob.x - sx) <= sound_range and abs(lob.y - sy) <= sound_range:
-                    # This agent heard a sound — don't overwrite if already pending
+                    # CSR: don't overwrite if already pending
                     if lob.id not in self._csr_pending:
                         self._csr_heard_events += 1
-                        self._csr_pending[lob.id] = (self.tick, lob.x, lob.y)
+                        if speaker_type == "social" and lob.agent_type == "social":
+                            self._csr_social_heard += 1
+                        self._csr_pending[lob.id] = (self.tick, lob.x, lob.y, speaker_type, lob.agent_type)
+
+                    # PCA: social→social only, speaker must be near rift
+                    if (speaker_type == "social" and lob.agent_type == "social"
+                            and speaker_rift_type and lob.id not in self._pca_pending):
+                        self._pca_events += 1
+                        self._pca_pending[lob.id] = (self.tick, speaker_rift_type)
+
+                    # Listener feedback: record most recent speaker for this listener
+                    self._heard_from[lob.id] = (speaker_id, self.tick)
+
+                    # CIC: track social listeners that heard sounds
+                    if lob.agent_type == "social" and lob.id not in self._cic_heard_pending:
+                        social_heard_this_tick.add(lob.id)
+
+        # CIC: register heard social agents and silent social agents
+        for lob in self.lobsters.values():
+            if not lob.alive or lob.agent_type != "social" or lob.age <= 100:
+                continue
+            if lob.id in social_heard_this_tick and lob.id not in self._cic_heard_pending:
+                self._cic_heard_pending[lob.id] = (self.tick, lob.x, lob.y)
+            elif lob.id not in social_heard_this_tick and lob.id not in self._cic_silent_pending:
+                # Only sample ~10% of silent agents to keep counts balanced
+                if random.random() < 0.10:
+                    self._cic_silent_pending[lob.id] = (self.tick, lob.x, lob.y)
+
+    def _resolve_cic_events(self):
+        """Resolve pending CIC events: did agent move closer to any rift within 5 ticks?"""
+        rift_radius = self.config["rifts"]["radius"]
+
+        def _moved_toward_rift(agent_id: str, orig_x: int, orig_y: int) -> bool:
+            lob = self.lobsters.get(agent_id)
+            if not lob or not lob.alive:
+                return False
+            for rift in self.rift_mgr.active_rifts:
+                old_dist = abs(orig_x - rift.x) + abs(orig_y - rift.y)
+                new_dist = abs(lob.x - rift.x) + abs(lob.y - rift.y)
+                if new_dist < old_dist and new_dist <= rift_radius:
+                    return True
+            return False
+
+        # Resolve heard events
+        resolved = []
+        for agent_id, (heard_tick, ox, oy) in self._cic_heard_pending.items():
+            if self.tick - heard_tick >= 5:
+                self._cic_heard_events += 1
+                if _moved_toward_rift(agent_id, ox, oy):
+                    self._cic_heard_moved += 1
+                resolved.append(agent_id)
+        for aid in resolved:
+            self._cic_heard_pending.pop(aid, None)
+
+        # Resolve silent events
+        resolved = []
+        for agent_id, (tick0, ox, oy) in self._cic_silent_pending.items():
+            if self.tick - tick0 >= 5:
+                self._cic_silent_events += 1
+                if _moved_toward_rift(agent_id, ox, oy):
+                    self._cic_silent_moved += 1
+                resolved.append(agent_id)
+        for aid in resolved:
+            self._cic_silent_pending.pop(aid, None)
 
     # ----- Helpers -----
 
@@ -468,6 +705,14 @@ class Ocean:
 
         return contexts if contexts else {"open_water"}
 
+    @staticmethod
+    def _heading(dx: int, dy: int) -> int:
+        """Convert relative (dx, dy) to compass heading 0-7, 8=at target."""
+        if dx == 0 and dy == 0:
+            return 8
+        angle = math.atan2(dy, dx)
+        return int((angle + math.pi) / (2 * math.pi) * 8) % 8
+
     def _get_speaker_context_key(self, lob: Lobster, rift_radius: int) -> tuple:
         """Build a discrete context key tuple for metrics (mirrors agent ContextDiscoverer dims)."""
         # dim 0: distance to nearest rift
@@ -478,8 +723,9 @@ class Ocean:
             max_richness = self.rift_mgr._richness_for_type(closest.rift_type)
             d1 = closest.richness / max_richness if max_richness > 0 else 0
             d2 = {"gold": 3, "silver": 2, "copper": 1}.get(closest.rift_type, 0)
+            d5 = self._heading(closest.x - lob.x, closest.y - lob.y)
         else:
-            d0, d1, d2 = 99, 0, 0
+            d0, d1, d2, d5 = 99, 0, 0, 8
 
         # dim 3: nearby lobster count
         d3 = sum(
@@ -505,7 +751,7 @@ class Ocean:
             d2,
             _bin(d3, 0, 10),
             _bin(d4, 0, 5),
-            0,  # heading placeholder (server doesn't track per-agent heading)
+            d5,  # heading to nearest rift (0-7 compass, 8=at target)
         )
 
     def _build_emergent_dictionary(self) -> list[dict]:
@@ -623,7 +869,13 @@ class Ocean:
                     "relative": [dx, dy],
                 })
 
-        # Sounds heard (within sound_range)
+        # Nearby pheromones (within vision radius)
+        nearby_food_trails = self.pheromone_map.read(lob.x, lob.y, "food", vision)
+        nearby_danger_trails = self.pheromone_map.read(lob.x, lob.y, "danger", vision)
+        in_colony = self.colony_mgr.get_colony_for(agent_id) is not None
+
+        # Sounds heard (within sound_range) — with channel noise
+        noise_rate = self.config.get("communication", {}).get("channel_noise_rate", 0.0)
         sounds_heard = []
         for snd in self.current_sounds:
             if snd["from"] == agent_id:
@@ -631,9 +883,17 @@ class Ocean:
             sx, sy = snd["pos"]
             dist = max(abs(sx - lob.x), abs(sy - lob.y))
             if dist <= sound_range:
+                # Channel noise: each sound has noise_rate chance of corruption
+                if noise_rate > 0:
+                    noisy = [
+                        random.choice(self.sounds) if random.random() < noise_rate else s
+                        for s in snd["sounds"]
+                    ]
+                else:
+                    noisy = snd["sounds"]
                 sounds_heard.append({
                     "from": snd["from"],
-                    "sounds": snd["sounds"],
+                    "sounds": noisy,
                     "distance": dist,
                     "tick": self.tick,
                 })
@@ -656,6 +916,11 @@ class Ocean:
             "alive": lob.alive,
             "last_epoch_reward": round(lob.last_epoch_reward, 2),
             "retired": lob.retired,
+            "group_hits": lob.group_hits,
+            "deaths_this_epoch": lob.deaths_this_epoch,
+            "nearby_food_trails": nearby_food_trails,
+            "nearby_danger_trails": nearby_danger_trails,
+            "my_colony": in_colony,
         }
 
     # ----- Viewer state -----
@@ -673,6 +938,7 @@ class Ocean:
                 "speaking": lob.speaking,
                 "net_credits": round(lob.credits_earned - lob.credits_spent, 2),
                 "grace": lob.grace_ticks > 0,
+                "colony": self.colony_mgr.get_colony_for(lob.id) is not None,
             })
 
         rifts = []
@@ -719,6 +985,8 @@ class Ocean:
             "predators": predators,
             "sounds": self.current_sounds,
             "sound_lines": self._build_sound_lines(),
+            "pheromones": self.pheromone_map.get_viewer_data(zone_min, zone_max),
+            "colonies": self.colony_mgr.get_viewer_data(),
             "emergent_dictionary": self._build_emergent_dictionary(),
             "epoch_history": self.epoch_history,
             "metrics": self.latest_metrics,
@@ -766,6 +1034,21 @@ class Ocean:
         self._csr_pending.clear()
         self._csr_heard_events = 0
         self._csr_successes = 0
+        self._csr_social_heard = 0
+        self._csr_social_successes = 0
+        self._pca_pending.clear()
+        self._pca_events = 0
+        self._pca_successes = 0
+        self._cic_heard_pending.clear()
+        self._cic_silent_pending.clear()
+        self._cic_heard_events = 0
+        self._cic_heard_moved = 0
+        self._cic_silent_events = 0
+        self._cic_silent_moved = 0
+        self._heard_from.clear()
+        self.cultural_cache = CulturalCache(self.config)
+        self.pheromone_map = PheromoneMap(self.config)
+        self.colony_mgr = ColonyManager(self.config)
         self._recalculate_active_zone()
         zone_min, zone_max = self._active_zone_bounds()
         self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)
