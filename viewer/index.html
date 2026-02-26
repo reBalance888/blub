@@ -251,181 +251,162 @@ function App() {
     }
   }, []);
 
-  // Canvas rendering
+  // Canvas rendering — camera zoomed to active zone
   useEffect(() => {
     if (!state || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     const W = canvas.width;
     const H = canvas.height;
-    const SIZE = 100;
-    const CELL = W / SIZE;
 
-    // Clear
+    // Camera: zoom to active zone with 2-cell padding
+    const az = state.active_zone || { min: 30, max: 69, size: 40 };
+    const pad = 2;
+    const camMin = Math.max(0, az.min - pad);
+    const camSize = az.size + pad * 2;
+    const CELL = W / camSize;
+
+    // Convert world coords to screen coords
+    const sx = (wx) => (wx - camMin) * CELL;
+    const sy = (wy) => (wy - camMin) * CELL;
+    const sc = (wx, wy) => [sx(wx) + CELL / 2, sy(wy) + CELL / 2];
+
+    // === LAYER 0: Ocean background ===
     ctx.fillStyle = COLORS.ocean;
     ctx.fillRect(0, 0, W, H);
 
-    // Grid lines (subtle)
-    ctx.strokeStyle = COLORS.grid;
+    // Subtle grid (every 5 cells)
+    ctx.strokeStyle = 'rgba(0, 212, 255, 0.035)';
     ctx.lineWidth = 0.5;
-    for (let i = 0; i <= SIZE; i += 10) {
+    for (let i = camMin; i <= camMin + camSize; i += 5) {
       ctx.beginPath();
-      ctx.moveTo(i * CELL, 0);
-      ctx.lineTo(i * CELL, H);
+      ctx.moveTo(sx(i), 0); ctx.lineTo(sx(i), H);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(0, i * CELL);
-      ctx.lineTo(W, i * CELL);
+      ctx.moveTo(0, sy(i)); ctx.lineTo(W, sy(i));
       ctx.stroke();
     }
 
-    // Active zone boundary
-    if (state.active_zone) {
-      const az = state.active_zone;
-      ctx.strokeStyle = 'rgba(0, 212, 255, 0.25)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 4]);
-      ctx.strokeRect(
-        az.min * CELL,
-        az.min * CELL,
-        az.size * CELL,
-        az.size * CELL
-      );
-      ctx.setLineDash([]);
+    // Active zone border (thin glow)
+    ctx.strokeStyle = 'rgba(0, 212, 255, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 4]);
+    ctx.strokeRect(sx(az.min), sy(az.min), az.size * CELL, az.size * CELL);
+    ctx.setLineDash([]);
 
-      // Dim area outside active zone
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-      // Top strip
-      ctx.fillRect(0, 0, W, az.min * CELL);
-      // Bottom strip
-      ctx.fillRect(0, (az.max + 1) * CELL, W, H - (az.max + 1) * CELL);
-      // Left strip
-      ctx.fillRect(0, az.min * CELL, az.min * CELL, az.size * CELL);
-      // Right strip
-      ctx.fillRect((az.max + 1) * CELL, az.min * CELL, W - (az.max + 1) * CELL, az.size * CELL);
-    }
-
-    // Pheromone trails (food = green-cyan, danger = red)
+    // === LAYER 1: Pheromone trails (soft atmospheric glow) ===
     if (state.pheromones) {
       for (const p of state.pheromones) {
-        const alpha = p.type === "food"
-          ? p.intensity * 0.4
-          : p.intensity * 0.3;
-        ctx.fillStyle = p.type === "food"
-          ? `rgba(0, 255, 180, ${alpha})`
-          : `rgba(255, 50, 50, ${alpha})`;
-        ctx.fillRect(p.pos[0] * CELL, p.pos[1] * CELL, CELL, CELL);
+        const [px, py] = [sx(p.pos[0]), sy(p.pos[1])];
+        const intensity = p.intensity;
+        if (p.type === "food") {
+          // Soft green radial glow
+          const r = CELL * (0.6 + intensity * 0.4);
+          const grad = ctx.createRadialGradient(px + CELL/2, py + CELL/2, 0, px + CELL/2, py + CELL/2, r);
+          grad.addColorStop(0, `rgba(0, 255, 180, ${intensity * 0.35})`);
+          grad.addColorStop(1, 'rgba(0, 255, 180, 0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(px + CELL/2 - r, py + CELL/2 - r, r * 2, r * 2);
+        } else {
+          // Soft red radial glow
+          const r = CELL * (0.5 + intensity * 0.3);
+          const grad = ctx.createRadialGradient(px + CELL/2, py + CELL/2, 0, px + CELL/2, py + CELL/2, r);
+          grad.addColorStop(0, `rgba(255, 40, 40, ${intensity * 0.25})`);
+          grad.addColorStop(1, 'rgba(255, 40, 40, 0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(px + CELL/2 - r, py + CELL/2 - r, r * 2, r * 2);
+        }
       }
     }
 
-    // Colony territory indicators
+    // === LAYER 2: Colony territories (subtle fill + dashed border) ===
     if (state.colonies) {
       for (const c of state.colonies) {
+        const [cx, cy] = sc(c.center[0], c.center[1]);
+        const r = c.size * CELL * 0.9;
+        // Soft fill
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+        grad.addColorStop(0, 'rgba(255, 200, 50, 0.08)');
+        grad.addColorStop(1, 'rgba(255, 200, 50, 0)');
+        ctx.fillStyle = grad;
         ctx.beginPath();
-        ctx.arc(
-          c.center[0] * CELL + CELL / 2,
-          c.center[1] * CELL + CELL / 2,
-          c.size * CELL * 0.8,
-          0, Math.PI * 2
-        );
-        ctx.strokeStyle = "rgba(255, 200, 50, 0.5)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([4, 4]);
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+        // Border
+        ctx.strokeStyle = 'rgba(255, 200, 50, 0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Colony label
-        ctx.fillStyle = "rgba(255, 200, 50, 0.7)";
-        ctx.font = "9px Courier New";
-        ctx.textAlign = "left";
-        ctx.fillText(
-          `Colony ${c.id} (${c.size})`,
-          c.center[0] * CELL,
-          c.center[1] * CELL - 5
-        );
+        // Label
+        ctx.fillStyle = 'rgba(255, 200, 50, 0.6)';
+        ctx.font = `${Math.max(9, CELL * 0.6)}px Courier New`;
+        ctx.textAlign = 'center';
+        ctx.fillText(`Colony (${c.size})`, cx, cy - r - 4);
       }
     }
 
-    // Communication lines (speaker → listener)
+    // === LAYER 3: Communication lines ===
     if (state.sound_lines && state.sound_lines.length > 0) {
-      ctx.globalAlpha = 0.25;
+      ctx.globalAlpha = 0.2;
       ctx.strokeStyle = COLORS.sound;
       ctx.lineWidth = 1;
       for (const line of state.sound_lines) {
-        const x1 = line.from[0] * CELL + CELL / 2;
-        const y1 = line.from[1] * CELL + CELL / 2;
-        const x2 = line.to[0] * CELL + CELL / 2;
-        const y2 = line.to[1] * CELL + CELL / 2;
+        const [x1, y1] = sc(line.from[0], line.from[1]);
+        const [x2, y2] = sc(line.to[0], line.to[1]);
         ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
+        ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
     }
 
-    // Rifts (pulsing circles, colored by type)
+    // === LAYER 4: Rifts (pulsing glow, colored by type) ===
     const pulse = 0.8 + 0.2 * Math.sin(Date.now() / 500);
     for (const rift of state.rifts) {
-      const rx = rift.pos[0] * CELL + CELL / 2;
-      const ry = rift.pos[1] * CELL + CELL / 2;
+      const [rx, ry] = sc(rift.pos[0], rift.pos[1]);
       const baseR = 3 * CELL;
       const r = baseR * rift.richness_pct * pulse;
       const riftColor = COLORS.riftType[rift.rift_type] || COLORS.rift;
 
-      // Glow
+      // Outer glow
       const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, r);
-      const rc = riftColor;
-      grad.addColorStop(0, rc + '66');
-      grad.addColorStop(0.5, rc + '26');
-      grad.addColorStop(1, rc + '00');
+      grad.addColorStop(0, riftColor + '55');
+      grad.addColorStop(0.5, riftColor + '22');
+      grad.addColorStop(1, riftColor + '00');
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(rx, ry, r, 0, Math.PI * 2);
       ctx.fill();
 
-      // Core
+      // Core dot
       ctx.fillStyle = riftColor;
       ctx.beginPath();
-      ctx.arc(rx, ry, CELL * 0.4, 0, Math.PI * 2);
+      ctx.arc(rx, ry, CELL * 0.35, 0, Math.PI * 2);
       ctx.fill();
+
+      // Type label
+      ctx.fillStyle = riftColor + 'aa';
+      ctx.font = `${Math.max(7, CELL * 0.45)}px Courier New`;
+      ctx.textAlign = 'center';
+      ctx.fillText(rift.rift_type[0].toUpperCase(), rx, ry + CELL * 0.15);
     }
 
-    // Predators (red triangles)
-    for (const pred of state.predators) {
-      const px = pred.pos[0] * CELL + CELL / 2;
-      const py = pred.pos[1] * CELL + CELL / 2;
-      const s = CELL * 0.8;
-
-      ctx.fillStyle = COLORS.predator;
-      ctx.beginPath();
-      ctx.moveTo(px, py - s);
-      ctx.lineTo(px - s * 0.7, py + s * 0.5);
-      ctx.lineTo(px + s * 0.7, py + s * 0.5);
-      ctx.closePath();
-      ctx.fill();
-
-      // Glow
-      ctx.shadowColor = COLORS.predator;
-      ctx.shadowBlur = 8;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-
-    // Lobsters (procedural micro-lobster sprites)
+    // === LAYER 5: Lobsters ===
     const t = Date.now();
     for (const lob of state.lobsters) {
-      const lx = lob.pos[0] * CELL + CELL / 2;
-      const ly = lob.pos[1] * CELL + CELL / 2;
-      const s = CELL * 0.8;  // bigger scale for visibility
+      const [lx, ly] = sc(lob.pos[0], lob.pos[1]);
+      const s = CELL * 0.55;
       const isSpeaking = lob.speaking && lob.speaking.length > 0;
 
       if (!lob.alive) {
-        // Dead: faded, flipped upside-down lobster
         ctx.save();
         ctx.translate(lx, ly);
         ctx.rotate(Math.PI);
-        ctx.globalAlpha = 0.3;
-        drawLobster(ctx, 0, 0, s * 0.7, COLORS.dead, false);
+        ctx.globalAlpha = 0.25;
+        drawLobster(ctx, 0, 0, s * 0.6, COLORS.dead, false);
         ctx.globalAlpha = 1;
         ctx.restore();
         continue;
@@ -433,65 +414,62 @@ function App() {
 
       const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
 
-      // Tier glow (colored halo behind lobster)
+      // Glow halo
       ctx.shadowColor = tierColor;
-      ctx.shadowBlur = CELL * 0.6;
+      ctx.shadowBlur = CELL * 0.5;
       ctx.fillStyle = tierColor;
       ctx.beginPath();
-      ctx.arc(lx, ly, s * 0.3, 0, Math.PI * 2);
+      ctx.arc(lx, ly, s * 0.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      // Claw animation: speaking lobsters wiggle claws
+      // Draw lobster
       const clawAngle = isSpeaking ? Math.sin(t / 80) * 0.4 : 0;
-
       ctx.save();
       ctx.translate(lx, ly);
       drawLobster(ctx, 0, 0, s, tierColor, true, clawAngle);
       ctx.restore();
 
-      // Colony indicator: tiny star above colony members
+      // Colony star
       if (lob.colony) {
-        ctx.fillStyle = 'rgba(255, 200, 50, 0.8)';
-        ctx.font = `${Math.max(5, CELL * 0.4)}px monospace`;
+        ctx.fillStyle = 'rgba(255, 200, 50, 0.9)';
+        ctx.font = `${Math.max(7, CELL * 0.45)}px monospace`;
         ctx.textAlign = 'center';
-        ctx.fillText('\u2605', lx, ly - s - 2);
+        ctx.fillText('\u2605', lx, ly - s - 3);
       }
 
-      // Grace shield (pulsing cyan ring)
+      // Grace shield
       if (lob.grace) {
         const gPulse = 0.4 + 0.6 * Math.abs(Math.sin(t / 300));
         ctx.strokeStyle = `rgba(0, 212, 255, ${gPulse})`;
         ctx.lineWidth = 1.5;
-        ctx.setLineDash([2, 2]);
+        ctx.setLineDash([3, 3]);
         ctx.beginPath();
-        ctx.arc(lx, ly, s + 3, 0, Math.PI * 2);
+        ctx.arc(lx, ly, s + 4, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
       }
 
-      // Speaking: sound wave rings
+      // Speaking wave
       if (isSpeaking) {
-        const wave = (t % 800) / 800;
-        ctx.strokeStyle = `rgba(127, 219, 202, ${0.6 - wave * 0.6})`;
+        const wave = (t % 1000) / 1000;
+        ctx.strokeStyle = `rgba(127, 219, 202, ${0.5 - wave * 0.5})`;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(lx, ly, s + 2 + wave * CELL * 1.5, 0, Math.PI * 2);
+        ctx.arc(lx, ly, s + 3 + wave * CELL * 2, 0, Math.PI * 2);
         ctx.stroke();
       }
 
-      // Selected highlight
+      // Selected
       if (selected && selected.id === lob.id) {
         ctx.strokeStyle = COLORS.gold;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(lx, ly, s + 5, 0, Math.PI * 2);
+        ctx.arc(lx, ly, s + 6, 0, Math.PI * 2);
         ctx.stroke();
-
         // Vision radius
-        const tierC = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
         const vision = lob.tier === 'kraken' ? 25 : lob.tier === 'lobster' ? 12 : 5;
-        ctx.strokeStyle = `${tierC}44`;
+        ctx.strokeStyle = `${tierColor}33`;
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
@@ -501,19 +479,42 @@ function App() {
       }
     }
 
-    // Floating sound texts
+    // === LAYER 6: Predators (on top, threatening) ===
+    for (const pred of state.predators) {
+      const [px, py] = sc(pred.pos[0], pred.pos[1]);
+      const s = CELL * 0.6;
+
+      // Red glow
+      ctx.shadowColor = COLORS.predator;
+      ctx.shadowBlur = CELL;
+      ctx.fillStyle = COLORS.predator;
+      ctx.beginPath();
+      ctx.moveTo(px, py - s);
+      ctx.lineTo(px - s * 0.7, py + s * 0.5);
+      ctx.lineTo(px + s * 0.7, py + s * 0.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Eye
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(px, py - s * 0.2, s * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // === LAYER 7: Floating sound texts ===
     const now = Date.now();
     for (const ft of floatingTexts) {
       const age = now - ft.born;
       if (age > 2000) continue;
       const alpha = 1 - age / 2000;
-      const fx = ft.x * CELL + CELL / 2;
-      const fy = ft.y * CELL - 5 - (age / 100);
+      const [fx, fy] = sc(ft.x, ft.y);
 
       ctx.fillStyle = `rgba(127, 219, 202, ${alpha})`;
-      ctx.font = '10px Courier New';
+      ctx.font = `${Math.max(9, CELL * 0.55)}px Courier New`;
       ctx.textAlign = 'center';
-      ctx.fillText(ft.text, fx, fy);
+      ctx.fillText(ft.text, fx, fy - CELL * 0.8 - (age / 120));
     }
   }, [state, selected, floatingTexts, drawLobster]);
 
@@ -534,7 +535,7 @@ function App() {
     return () => cancelAnimationFrame(raf);
   }, [state]);
 
-  // Click handler
+  // Click handler (uses same camera as renderer)
   const handleCanvasClick = useCallback((e) => {
     if (!state) return;
     const canvas = canvasRef.current;
@@ -543,13 +544,19 @@ function App() {
     const scaleY = canvas.height / rect.height;
     const mx = (e.clientX - rect.left) * scaleX;
     const my = (e.clientY - rect.top) * scaleY;
-    const CELL = canvas.width / 100;
+
+    // Same camera math as renderer
+    const az = state.active_zone || { min: 30, max: 69, size: 40 };
+    const pad = 2;
+    const camMin = Math.max(0, az.min - pad);
+    const camSize = az.size + pad * 2;
+    const CELL = canvas.width / camSize;
 
     let found = null;
     let minDist = Infinity;
     for (const lob of state.lobsters) {
-      const lx = lob.pos[0] * CELL + CELL / 2;
-      const ly = lob.pos[1] * CELL + CELL / 2;
+      const lx = (lob.pos[0] - camMin) * CELL + CELL / 2;
+      const ly = (lob.pos[1] - camMin) * CELL + CELL / 2;
       const d = Math.sqrt((mx - lx) ** 2 + (my - ly) ** 2);
       if (d < CELL * 2 && d < minDist) {
         minDist = d;
