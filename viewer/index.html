@@ -133,94 +133,121 @@ function App() {
 
   // Procedural lobster drawing function
   const drawLobster = useCallback((ctx, x, y, s, color, alive, clawAngle = 0) => {
-    // s = half-size (~3.5px at default). Origin at (x,y) center.
-    // Body: oval
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.ellipse(x, y, s * 0.55, s * 0.85, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // s = half-size (~3.5px). Lobster = round carapace + BIG claws + eye stalks + small legs
+    const lw = Math.max(1, s * 0.25);
 
-    // Darker shell stripe
-    ctx.fillStyle = alive ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)';
-    ctx.beginPath();
-    ctx.ellipse(x, y - s * 0.1, s * 0.3, s * 0.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Tail (3 small fan segments at bottom)
-    ctx.fillStyle = color;
-    const tailY = y + s * 0.85;
-    for (let i = -1; i <= 1; i++) {
-      ctx.beginPath();
-      ctx.ellipse(x + i * s * 0.25, tailY, s * 0.18, s * 0.3, i * 0.3, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Claws (two V-shapes, animated when speaking)
+    // --- Arms (behind body, from shoulders to claws) ---
     ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(1, s * 0.3);
+    ctx.lineWidth = lw;
     ctx.lineCap = 'round';
 
-    // Left claw
+    // Left arm + claw
     ctx.save();
-    ctx.translate(x - s * 0.4, y - s * 0.5);
-    ctx.rotate(-0.5 + clawAngle);
+    ctx.translate(x - s * 0.5, y - s * 0.15);
+    ctx.rotate(-0.6 + clawAngle);
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.lineTo(-s * 0.5, -s * 0.4);
-    ctx.moveTo(-s * 0.35, -s * 0.55);
-    ctx.lineTo(-s * 0.5, -s * 0.4);
-    ctx.lineTo(-s * 0.2, -s * 0.55);
+    ctx.lineTo(-s * 0.5, -s * 0.35);
+    ctx.stroke();
+    // Claw pincer (filled oval)
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.55, -s * 0.5, s * 0.28, s * 0.18, -0.4, 0, Math.PI * 2);
+    ctx.fill();
+    // Claw gap (dark slit)
+    ctx.strokeStyle = alive ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = Math.max(0.5, s * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.38, -s * 0.48);
+    ctx.lineTo(-s * 0.7, -s * 0.52);
     ctx.stroke();
     ctx.restore();
 
-    // Right claw
+    // Right arm + claw
     ctx.save();
-    ctx.translate(x + s * 0.4, y - s * 0.5);
-    ctx.rotate(0.5 - clawAngle);
+    ctx.translate(x + s * 0.5, y - s * 0.15);
+    ctx.rotate(0.6 - clawAngle);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.lineTo(s * 0.5, -s * 0.4);
-    ctx.moveTo(s * 0.35, -s * 0.55);
-    ctx.lineTo(s * 0.5, -s * 0.4);
-    ctx.lineTo(s * 0.2, -s * 0.55);
+    ctx.lineTo(s * 0.5, -s * 0.35);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(s * 0.55, -s * 0.5, s * 0.28, s * 0.18, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = alive ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = Math.max(0.5, s * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(s * 0.38, -s * 0.48);
+    ctx.lineTo(s * 0.7, -s * 0.52);
     ctx.stroke();
     ctx.restore();
 
-    // Eyes (two tiny dots)
+    // --- Small legs (2 pairs, short and stubby) ---
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(0.5, s * 0.12);
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 2; i++) {
+      const legY = y + s * (0.15 + i * 0.3);
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.45, legY);
+      ctx.lineTo(x - s * 0.7, legY + s * 0.15);
+      ctx.moveTo(x + s * 0.45, legY);
+      ctx.lineTo(x + s * 0.7, legY + s * 0.15);
+      ctx.stroke();
+    }
+
+    // --- Body / Carapace (wide round shell) ---
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(x, y + s * 0.1, s * 0.52, s * 0.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Shell highlight (lighter arc on top)
+    ctx.fillStyle = alive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
+    ctx.beginPath();
+    ctx.ellipse(x - s * 0.08, y - s * 0.1, s * 0.25, s * 0.3, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Shell pattern (subtle darker middle line)
+    ctx.strokeStyle = alive ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.05)';
+    ctx.lineWidth = Math.max(0.5, s * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(x, y - s * 0.35);
+    ctx.lineTo(x, y + s * 0.55);
+    ctx.stroke();
+
+    // --- Tail (small, curled under — not a fan!) ---
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(x, y + s * 0.7, s * 0.2, s * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- Eye stalks (short sticks with dots on top) ---
     if (alive) {
+      // Stalks
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(0.8, s * 0.15);
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.2, y - s * 0.35);
+      ctx.lineTo(x - s * 0.3, y - s * 0.65);
+      ctx.moveTo(x + s * 0.2, y - s * 0.35);
+      ctx.lineTo(x + s * 0.3, y - s * 0.65);
+      ctx.stroke();
+      // Eyes (bright dots)
       ctx.fillStyle = '#fff';
       ctx.beginPath();
-      ctx.arc(x - s * 0.2, y - s * 0.55, s * 0.12, 0, Math.PI * 2);
-      ctx.arc(x + s * 0.2, y - s * 0.55, s * 0.12, 0, Math.PI * 2);
+      ctx.arc(x - s * 0.3, y - s * 0.68, s * 0.13, 0, Math.PI * 2);
+      ctx.arc(x + s * 0.3, y - s * 0.68, s * 0.13, 0, Math.PI * 2);
       ctx.fill();
       // Pupils
       ctx.fillStyle = '#111';
       ctx.beginPath();
-      ctx.arc(x - s * 0.18, y - s * 0.55, s * 0.06, 0, Math.PI * 2);
-      ctx.arc(x + s * 0.18, y - s * 0.55, s * 0.06, 0, Math.PI * 2);
+      ctx.arc(x - s * 0.28, y - s * 0.68, s * 0.06, 0, Math.PI * 2);
+      ctx.arc(x + s * 0.28, y - s * 0.68, s * 0.06, 0, Math.PI * 2);
       ctx.fill();
-    }
-
-    // Antennae (two thin whiskers)
-    ctx.strokeStyle = alive ? color : COLORS.dead;
-    ctx.lineWidth = Math.max(0.5, s * 0.12);
-    ctx.beginPath();
-    ctx.moveTo(x - s * 0.15, y - s * 0.7);
-    ctx.quadraticCurveTo(x - s * 0.6, y - s * 1.4, x - s * 0.8, y - s * 1.2);
-    ctx.moveTo(x + s * 0.15, y - s * 0.7);
-    ctx.quadraticCurveTo(x + s * 0.6, y - s * 1.4, x + s * 0.8, y - s * 1.2);
-    ctx.stroke();
-
-    // Legs (3 pairs, tiny)
-    ctx.lineWidth = Math.max(0.5, s * 0.1);
-    for (let i = 0; i < 3; i++) {
-      const legY = y + s * (-0.1 + i * 0.3);
-      ctx.beginPath();
-      ctx.moveTo(x - s * 0.5, legY);
-      ctx.lineTo(x - s * 0.85, legY + s * 0.2);
-      ctx.moveTo(x + s * 0.5, legY);
-      ctx.lineTo(x + s * 0.85, legY + s * 0.2);
-      ctx.stroke();
     }
   }, []);
 
@@ -389,22 +416,31 @@ function App() {
     for (const lob of state.lobsters) {
       const lx = lob.pos[0] * CELL + CELL / 2;
       const ly = lob.pos[1] * CELL + CELL / 2;
-      const s = CELL * 0.48;  // base scale
+      const s = CELL * 0.8;  // bigger scale for visibility
       const isSpeaking = lob.speaking && lob.speaking.length > 0;
 
       if (!lob.alive) {
         // Dead: faded, flipped upside-down lobster
         ctx.save();
         ctx.translate(lx, ly);
-        ctx.rotate(Math.PI);  // flipped
+        ctx.rotate(Math.PI);
         ctx.globalAlpha = 0.3;
-        drawLobster(ctx, 0, 0, s, COLORS.dead, false);
+        drawLobster(ctx, 0, 0, s * 0.7, COLORS.dead, false);
         ctx.globalAlpha = 1;
         ctx.restore();
         continue;
       }
 
       const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
+
+      // Tier glow (colored halo behind lobster)
+      ctx.shadowColor = tierColor;
+      ctx.shadowBlur = CELL * 0.6;
+      ctx.fillStyle = tierColor;
+      ctx.beginPath();
+      ctx.arc(lx, ly, s * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
 
       // Claw animation: speaking lobsters wiggle claws
       const clawAngle = isSpeaking ? Math.sin(t / 80) * 0.4 : 0;
