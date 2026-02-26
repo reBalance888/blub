@@ -21,19 +21,19 @@ from greedy_agent import GreedyAgent
 from social_agent import SocialAgent
 
 
-def _load_ablation() -> dict:
-    """Load ablation flags from config.yaml."""
+def _load_config_sections() -> tuple[dict, dict]:
+    """Load ablation and language config from config.yaml."""
     config_path = Path(__file__).parent.parent / "config.yaml"
     try:
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
-        return cfg.get("ablation", {})
+        return cfg.get("ablation", {}), cfg.get("language", {})
     except Exception:
-        return {}
+        return {}, {}
 
 
 async def main(count: int, agent_type: str, server: str):
-    ablation = _load_ablation()
+    ablation, language_cfg = _load_config_sections()
     agents: list[BlubAgent] = []
 
     for i in range(count):
@@ -42,7 +42,7 @@ async def main(count: int, agent_type: str, server: str):
         elif agent_type == "greedy":
             agent = GreedyAgent(f"greedy_{i}", server)
         elif agent_type == "social":
-            agent = SocialAgent(f"social_{i}", server, ablation=ablation)
+            agent = SocialAgent(f"social_{i}", server, ablation=ablation, language_cfg=language_cfg)
         elif agent_type == "mix":
             # Mix: 20% random, 30% greedy, 50% social
             if i < count * 0.2:
@@ -50,13 +50,14 @@ async def main(count: int, agent_type: str, server: str):
             elif i < count * 0.5:
                 agent = GreedyAgent(f"greedy_{i}", server)
             else:
-                agent = SocialAgent(f"social_{i}", server, ablation=ablation)
+                agent = SocialAgent(f"social_{i}", server, ablation=ablation, language_cfg=language_cfg)
         else:
             agent = RandomAgent(f"agent_{i}", server)
         agents.append(agent)
 
     print(f"Launching {count} agents ({agent_type}) -> {server}")
     print(f"Ablation flags: {ablation}")
+    print(f"Language config: {language_cfg}")
     await asyncio.gather(*[a.run() for a in agents])
 
 

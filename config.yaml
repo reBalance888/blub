@@ -82,17 +82,19 @@ agents:
   agent_lifetime: 3000  # ticks (~5 epochs) before retirement & naive replacement
 
 pheromones:
-  decay_rate: 0.95          # per-tick multiplier (trail lasts ~60 ticks = 6 sec)
+  food_decay_rate: 0.93     # per-tick multiplier for food trails (faster decay)
+  danger_decay_rate: 0.97   # per-tick multiplier for danger trails (persists longer)
   diffusion_rate: 0.1       # spread to 4 neighbors per tick
   max_intensity: 10.0
   food_deposit_scale: 0.02  # reward → deposit multiplier
   danger_deposit: 3.0       # fixed deposit on death
+  trail_reinforce: 0.05     # positive feedback when lobster follows food trail
 
 colonies:
   formation_threshold: 4    # min agents to form
   formation_radius: 3       # max distance between members
   persistence_ticks: 30     # ticks as candidate before promotion
-  reward_bonus: 1.2         # 20% rift reward bonus for members
+  reward_bonus: 1.5         # 50% rift reward bonus for members
   max_colonies: 5
 
 ablation:
@@ -108,6 +110,13 @@ cultural_cache:
   contribution_interval: 200
   noise_std: 0.10
   partial_reset_retention: 0.20
+
+language:
+  sigma_start: 1.0
+  sigma_min: 0.5
+  sigma_anneal_per_epoch: 0.02
+  topo_bonus_scale: 4.0
+  weight_decay: 0.9995
 
 auto_balance:
   enabled: true

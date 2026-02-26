@@ -10,7 +10,9 @@ class PheromoneMap:
 
     def __init__(self, config: dict):
         self.cfg = config.get("pheromones", {})
-        self.decay_rate = self.cfg.get("decay_rate", 0.95)
+        # Differential decay: food trails evaporate faster, danger persists longer
+        self.food_decay = self.cfg.get("food_decay_rate", self.cfg.get("decay_rate", 0.93))
+        self.danger_decay = self.cfg.get("danger_decay_rate", self.cfg.get("decay_rate", 0.97))
         self.diffusion_rate = self.cfg.get("diffusion_rate", 0.1)
         self.max_intensity = self.cfg.get("max_intensity", 10.0)
         self.evaporation_threshold = 0.01
@@ -36,13 +38,14 @@ class PheromoneMap:
         return result
 
     def tick(self):
-        """Decay + diffusion each tick."""
-        for trails in (self.food_trails, self.danger_trails):
+        """Decay + diffusion each tick. Food and danger decay at different rates."""
+        for trails, decay_rate in ((self.food_trails, self.food_decay),
+                                   (self.danger_trails, self.danger_decay)):
             # Decay
             to_remove = []
             new_vals = {}
             for pos, intensity in trails.items():
-                new_val = intensity * self.decay_rate
+                new_val = intensity * decay_rate
                 if new_val < self.evaporation_threshold:
                     to_remove.append(pos)
                 else:

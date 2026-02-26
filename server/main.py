@@ -197,13 +197,22 @@ async def knowledge_bootstrap():
 
 @app.get("/knowledge/mentor")
 async def knowledge_mentor(agent_id: str = ""):
-    """Return knowledge snapshot from nearest experienced social agent (mentor)."""
+    """Return knowledge snapshot from nearest experienced social agent (mentor).
+    Colony-restricted: prefer mentors from same colony, fallback to any nearby."""
     lob = ocean.lobsters.get(agent_id)
     if not lob:
         return {"production": {}, "comprehension": {}}
-    # Find nearest social agent with age > 500 that has a snapshot
-    best_dist = float("inf")
-    best_snapshot = None
+
+    # Check if this lobster belongs to a colony
+    my_colony = ocean.colony_mgr.get_colony_for(agent_id)
+    colony_members = set(my_colony.members) if my_colony else set()
+
+    # Find nearest mentor — prioritize same-colony members
+    best_colony_dist = float("inf")
+    best_colony_snapshot = None
+    best_any_dist = float("inf")
+    best_any_snapshot = None
+
     for other_id, other_lob in ocean.lobsters.items():
         if other_id == agent_id:
             continue
@@ -212,10 +221,19 @@ async def knowledge_mentor(agent_id: str = ""):
         if other_id not in ocean.cultural_cache.agent_snapshots:
             continue
         dist = abs(lob.x - other_lob.x) + abs(lob.y - other_lob.y)
-        if dist <= 15 and dist < best_dist:
-            best_dist = dist
-            best_snapshot = ocean.cultural_cache.agent_snapshots[other_id]
-    return best_snapshot or {"production": {}, "comprehension": {}}
+        if dist > 15:
+            continue
+        snapshot = ocean.cultural_cache.agent_snapshots[other_id]
+        # Same colony mentor (preferred)
+        if other_id in colony_members and dist < best_colony_dist:
+            best_colony_dist = dist
+            best_colony_snapshot = snapshot
+        # Any nearby mentor (fallback)
+        if dist < best_any_dist:
+            best_any_dist = dist
+            best_any_snapshot = snapshot
+
+    return best_colony_snapshot or best_any_snapshot or {"production": {}, "comprehension": {}}
 
 
 @app.post("/reset")

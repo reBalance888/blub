@@ -25,7 +25,8 @@ class PredatorManager:
         self.next_pred_id: int = 1
 
     def process_tick(self, lobster_positions: list[tuple[int, int]], ocean_size: int,
-                     rift_positions: list[tuple[int, int]] | None = None):
+                     rift_positions: list[tuple[int, int]] | None = None,
+                     pheromone_map=None):
         """Spawn new predators based on density (sigmoid), move existing ones, remove expired."""
         zone_size = self.config["predators"]["zone_size"]
         max_rate = self.config["predators"]["base_spawn_rate"]
@@ -79,25 +80,44 @@ class PredatorManager:
                     Predator(id=pid, x=float(px), y=float(py), lifetime_remaining=lifetime)
                 )
 
-        # Move predators toward nearest lobster
+        # Move predators toward nearest lobster, blended with danger pheromone attraction
         for pred in self.active_predators:
             pred.lifetime_remaining -= 1
 
-            if not lobster_positions:
-                continue
+            dx, dy = 0.0, 0.0
+            has_target = False
 
-            # Find nearest lobster
-            nearest = min(
-                lobster_positions,
-                key=lambda p: math.sqrt((p[0] - pred.x) ** 2 + (p[1] - pred.y) ** 2),
-            )
-            dx = nearest[0] - pred.x
-            dy = nearest[1] - pred.y
-            dist = math.sqrt(dx * dx + dy * dy)
+            if lobster_positions:
+                # Find nearest lobster
+                nearest = min(
+                    lobster_positions,
+                    key=lambda p: math.sqrt((p[0] - pred.x) ** 2 + (p[1] - pred.y) ** 2),
+                )
+                dx = nearest[0] - pred.x
+                dy = nearest[1] - pred.y
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist > 0:
+                    dx /= dist
+                    dy /= dist
+                    has_target = True
 
-            if dist > 0:
-                pred.x += (dx / dist) * speed
-                pred.y += (dy / dist) * speed
+            # Blend with danger pheromone attraction (30% weight)
+            if pheromone_map and has_target:
+                danger = pheromone_map.read(int(pred.x), int(pred.y), "danger", radius=5)
+                if danger:
+                    best = max(danger, key=lambda t: t["intensity"])
+                    if best["intensity"] > 1.0:
+                        pdx, pdy = best["dx"], best["dy"]
+                        pdist = math.sqrt(pdx * pdx + pdy * pdy)
+                        if pdist > 0:
+                            dx = dx * 0.7 + (pdx / pdist) * 0.3
+                            dy = dy * 0.7 + (pdy / pdist) * 0.3
+
+            if has_target or (dx != 0 or dy != 0):
+                norm = math.sqrt(dx * dx + dy * dy)
+                if norm > 0:
+                    pred.x += (dx / norm) * speed
+                    pred.y += (dy / norm) * speed
                 pred.x = max(0, min(ocean_size - 1, pred.x))
                 pred.y = max(0, min(ocean_size - 1, pred.y))
 

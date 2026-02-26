@@ -52,6 +52,7 @@ class MetricsLogger:
             "tick": tick,
             "epoch": epoch,
             "vocabulary_size": self._vocab_size(),
+            "vocab_argmax": self._vocab_size_argmax(),
             "top_sim": self._topographic_similarity(use_long=True),
             "pos_dis": self._positional_disentanglement(),
             "bos_dis": self._bag_of_symbols_disentanglement(),
@@ -87,8 +88,8 @@ class MetricsLogger:
         # Short buffer: per-epoch reset for PosDis/BosDis
         self.observations.clear()
         self.social_observations.clear()
-        # Long buffer: rolling window ~5000 for TopSim/MI (≈3 epochs)
-        max_long = 5000
+        # Long buffer: rolling window ~20000 for TopSim/MI (≈100 obs/context)
+        max_long = 20000
         if len(self.long_observations) > max_long:
             self.long_observations = self.long_observations[-max_long:]
 
@@ -113,6 +114,24 @@ class MetricsLogger:
             if best_count / total > 0.6:
                 vocab += 1
         return vocab
+
+    def _vocab_size_argmax(self) -> int:
+        """Count unique most-probable messages per context (argmax vocabulary).
+        Uses long observations for stability."""
+        obs = self.long_observations if self.long_observations else self.observations
+        if not obs:
+            return 0
+        # context → {message_seq: count}
+        ctx_best: dict[tuple, dict[tuple, int]] = {}
+        for seq, ctx, _ in obs:
+            if ctx not in ctx_best:
+                ctx_best[ctx] = {}
+            ctx_best[ctx][seq] = ctx_best[ctx].get(seq, 0) + 1
+        vocab = set()
+        for ctx, seq_counts in ctx_best.items():
+            best_seq = max(seq_counts, key=seq_counts.get)
+            vocab.add(best_seq)
+        return len(vocab)
 
     def _topographic_similarity(self, use_long: bool = False) -> float:
         """Spearman correlation between meaning distances and signal distances.

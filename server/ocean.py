@@ -38,6 +38,7 @@ class Lobster:
     age: int = 0  # ticks since spawn (for turnover)
     retired: bool = False  # flagged for replacement
     reward_this_tick: float = 0.0  # rift reward earned THIS tick (for pheromone deposit)
+    path_history: list = field(default_factory=list)  # recent positions for trail deposit
 
 
 class Ocean:
@@ -192,13 +193,23 @@ class Ocean:
         # 3. Rift rewards (group bonus)
         self._process_rift_rewards()
 
-        # 3a. Pheromone deposits from rift rewards (food trails)
+        # 3a. Pheromone deposits from rift rewards — path-based (ACO-style)
         food_scale = self.config.get("pheromones", {}).get("food_deposit_scale", 0.02)
+        trail_reinforce = self.config.get("pheromones", {}).get("trail_reinforce", 0.05)
         for lob in self.lobsters.values():
             if lob.alive and lob.reward_this_tick > 0:
-                deposit_amt = min(lob.reward_this_tick * food_scale, 2.0)
-                if deposit_amt > 0.01:
-                    self.pheromone_map.deposit(lob.x, lob.y, "food", deposit_amt)
+                # Deposit along recent path (last 30 positions), not just current cell
+                path = lob.path_history[-30:]
+                if path:
+                    deposit_per_cell = min(lob.reward_this_tick * food_scale / len(path), 1.0)
+                    if deposit_per_cell > 0.005:
+                        for px, py in path:
+                            self.pheromone_map.deposit(px, py, "food", deposit_per_cell)
+            # Trail reinforcement: positive feedback when following strong food trails
+            if lob.alive and trail_reinforce > 0:
+                food_here = self.pheromone_map.food_trails.get((lob.x, lob.y), 0)
+                if food_here > 0.5:
+                    self.pheromone_map.deposit(lob.x, lob.y, "food", trail_reinforce)
 
         # 3b. Decrement grace ticks & increment age
         turnover_enabled = self.config.get("ablation", {}).get("turnover", True)
@@ -215,9 +226,12 @@ class Ocean:
         # 3c. Track CSR: agents that heard sounds — record positions for move-toward-rift check
         self._track_csr_heard()
 
-        # 4. Predator spawns & movement
+        # 4. Predator spawns & movement (with danger pheromone attraction)
         rift_positions = [(r.x, r.y) for r in self.rift_mgr.active_rifts]
-        self.predator_mgr.process_tick(self._get_lobster_positions(), self.size, rift_positions)
+        self.predator_mgr.process_tick(
+            self._get_lobster_positions(), self.size, rift_positions,
+            pheromone_map=self.pheromone_map,
+        )
 
         # 5. Predator kills
         kill_positions = self._process_predator_kills()
@@ -286,6 +300,10 @@ class Ocean:
             dx, dy = directions.get(move, (0, 0))
             lob.x = max(zone_min, min(zone_max, lob.x + dx))
             lob.y = max(zone_min, min(zone_max, lob.y + dy))
+            # Track path history for trail-based pheromone deposit
+            lob.path_history.append((lob.x, lob.y))
+            if len(lob.path_history) > 50:
+                lob.path_history = lob.path_history[-50:]
 
     def _process_sounds(self):
         sound_cost_enabled = self.config.get("ablation", {}).get("sound_cost", True)

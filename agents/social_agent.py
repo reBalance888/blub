@@ -178,14 +178,18 @@ class GaussianProductionPolicy:
 
     MUTATION_RATE = 0.05
     MAX_NORM = 8.0
-    SIGMA = 1.8  # Gaussian spread in sound space (wider → more diversity → PosDis)
 
     def __init__(self, n_sounds: int = 10, n_dims: int = 3, max_len: int = 2,
-                 lr: float = 0.03):
+                 lr: float = 0.03, language_cfg: dict | None = None):
         self.n_sounds = n_sounds
         self.n_dims = n_dims
         self.max_len = max_len
         self.lr = lr
+        lang = language_cfg or {}
+        self.sigma = lang.get("sigma_start", 1.0)
+        self.sigma_min = lang.get("sigma_min", 0.5)
+        self.sigma_anneal = lang.get("sigma_anneal_per_epoch", 0.02)
+        self.weight_decay = lang.get("weight_decay", 0.9995)
         # Structured init: W @ normalized_ctx → sigmoid → [0,1] → sound index.
         # Position 0: high spatial → HIGH sounds (positive gradient)
         # Position 1: high social → LOW sounds (flipped gradient)
@@ -219,7 +223,7 @@ class GaussianProductionPolicy:
     def _sound_probs(self, mu: float) -> list[float]:
         """Discretized Gaussian: P(sound=i) ∝ exp(-(i - μ*(n-1))² / 2σ²)."""
         center = mu * (self.n_sounds - 1)
-        sig2 = 2.0 * self.SIGMA * self.SIGMA
+        sig2 = 2.0 * self.sigma * self.sigma
         probs = [math.exp(-(i - center) ** 2 / sig2) for i in range(self.n_sounds)]
         total = sum(probs)
         return [p / total for p in probs] if total > 0 else [1.0 / self.n_sounds] * self.n_sounds
@@ -260,20 +264,28 @@ class GaussianProductionPolicy:
             mu = self._forward_mu(pos, sub_ctx)
             action = message[pos]
 
-            # Target mu for the chosen sound
-            target_mu = action / (self.n_sounds - 1)
-            # Gradient of log-likelihood: d/dW ∝ (target_mu - mu) * mu * (1-mu) * x
-            # (derivative of sigmoid output w.r.t. pre-sigmoid input)
-            grad_mu = (target_mu - mu) * mu * (1 - mu)
+            # Correct REINFORCE for discretized Gaussian:
+            # d log P(k)/dW ≈ (k - center)/σ² × (n-1) × sigmoid'(z) × x
+            center = mu * (self.n_sounds - 1)  # mu_scaled ∈ [0, n-1]
+            # Gaussian score: (k - center) / σ²
+            score = (action - center) / (self.sigma ** 2)
+            # Chain rule: d(center)/d(mu_raw) = (n-1), d(mu_raw)/d(z) = mu*(1-mu)
+            grad_mu = score * (self.n_sounds - 1) * mu * (1 - mu)
 
             for j in range(len(x)):
                 self.W[pos][j] += self.lr * advantage * grad_mu * x[j]
+
+    def anneal_sigma(self):
+        """Reduce σ by fixed step each epoch (exploration → exploitation)."""
+        old = self.sigma
+        self.sigma = max(self.sigma_min, self.sigma - self.sigma_anneal)
+        return old, self.sigma
 
     def decay_all(self):
         """Gentle weight decay."""
         for pos in range(self.max_len):
             for j in range(len(self.W[pos])):
-                self.W[pos][j] *= 0.9995
+                self.W[pos][j] *= self.weight_decay
 
     def top_sounds(self, ctx_key: tuple, n: int = 3) -> list[tuple[int, float]]:
         """Return top sounds for a context (for logging)."""
@@ -373,12 +385,15 @@ class SocialAgent(BlubAgent):
       5: heading to nearest rift (0-7 compass, 8=none)
     """
 
-    def __init__(self, *args, ablation: dict | None = None, **kwargs):
+    def __init__(self, *args, ablation: dict | None = None,
+                 language_cfg: dict | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.ablation = ablation or {}
+        self.language_cfg = language_cfg or {}
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
         self.production = GaussianProductionPolicy(
-            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03
+            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03,
+            language_cfg=self.language_cfg,
         )
         self.comprehension = Comprehension()
         self.last_ctx: tuple = (0,) * 6
@@ -388,6 +403,8 @@ class SocialAgent(BlubAgent):
         self.last_group_hits: int = 0
         self.last_deaths: int = 0
         self.decay_counter: int = 0
+        self.last_epoch: int = -1  # for epoch-change detection (sigma annealing)
+        self.topo_bonus_scale: float = self.language_cfg.get("topo_bonus_scale", 4.0)
         # Topographic tracking: recent (message_tuple, ctx_key) pairs
         self._msg_history: list[tuple[tuple, tuple]] = []
 
@@ -597,6 +614,13 @@ class SocialAgent(BlubAgent):
         self.last_group_hits = current_group
         self.last_deaths = current_deaths
 
+        # Sigma annealing at epoch boundary
+        current_epoch = state.get("epoch", 0)
+        if current_epoch != self.last_epoch and self.last_epoch >= 0:
+            old_s, new_s = self.production.anneal_sigma()
+            print(f"[{self.name}] σ anneal: {old_s:.3f} → {new_s:.3f} (epoch {current_epoch})")
+        self.last_epoch = current_epoch
+
         # Decay weights every 50 ticks
         self.decay_counter += 1
         if self.decay_counter >= 50:
@@ -608,7 +632,7 @@ class SocialAgent(BlubAgent):
             top = self.production.top_sounds(ctx_key, n=3)
             top_info = {SOUNDS[i]: f"{p:.0%}" for i, p in top}
             w_info = [f"{w:.2f}" for w in self.production.W[0]]
-            print(f"[{self.name}] tick={state['tick']} top={top_info} W0={w_info}")
+            print(f"[{self.name}] tick={state['tick']} σ={self.production.sigma:.2f} top={top_info} W0={w_info}")
 
         speak: list[str] = []
 
@@ -735,17 +759,18 @@ class SocialAgent(BlubAgent):
             )
             # Reward correlated distances (close→close, far→far)
             # Penalize anti-correlation (close→far, far→close)
-            # Magnitudes ~20-50% of typical main reward for meaningful gradient
+            # Base magnitudes scaled by topo_bonus_scale (default 4x → ~15% of main reward)
+            scale = self.topo_bonus_scale
             if m_dist < 0.35:  # close meanings
                 if s_dist < 0.25:
-                    bonus += 2.0  # close sounds → strong reward
+                    bonus += 2.0 * scale  # close sounds → strong reward
                 elif s_dist > 0.6:
-                    bonus -= 1.5  # distant sounds → penalty
+                    bonus -= 1.5 * scale  # distant sounds → penalty
             elif m_dist > 0.65:  # distant meanings
                 if s_dist > 0.6:
-                    bonus += 1.0  # distant sounds → moderate reward
+                    bonus += 1.0 * scale  # distant sounds → moderate reward
                 elif s_dist < 0.25:
-                    bonus -= 0.5  # close sounds for distant meanings → small penalty
+                    bonus -= 0.5 * scale  # close sounds for distant meanings → small penalty
             n += 1
         return bonus / max(n, 1)
 
@@ -753,7 +778,8 @@ class SocialAgent(BlubAgent):
         """Reset all learned language state (for turnover/rebirth as naive)."""
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
         self.production = GaussianProductionPolicy(
-            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03
+            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03,
+            language_cfg=self.language_cfg,
         )
         self.comprehension = Comprehension()
         self.last_ctx = (0,) * 6
@@ -763,6 +789,7 @@ class SocialAgent(BlubAgent):
         self.last_group_hits = 0
         self.last_deaths = 0
         self.decay_counter = 0
+        self.last_epoch = -1
         print(f"[{self.name}] Language state RESET (turnover rebirth)")
 
 
