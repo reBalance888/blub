@@ -131,6 +131,99 @@ function App() {
     return () => wsRef.current?.close();
   }, []);
 
+  // Procedural lobster drawing function
+  const drawLobster = useCallback((ctx, x, y, s, color, alive, clawAngle = 0) => {
+    // s = half-size (~3.5px at default). Origin at (x,y) center.
+    // Body: oval
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(x, y, s * 0.55, s * 0.85, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Darker shell stripe
+    ctx.fillStyle = alive ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)';
+    ctx.beginPath();
+    ctx.ellipse(x, y - s * 0.1, s * 0.3, s * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tail (3 small fan segments at bottom)
+    ctx.fillStyle = color;
+    const tailY = y + s * 0.85;
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.ellipse(x + i * s * 0.25, tailY, s * 0.18, s * 0.3, i * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Claws (two V-shapes, animated when speaking)
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1, s * 0.3);
+    ctx.lineCap = 'round';
+
+    // Left claw
+    ctx.save();
+    ctx.translate(x - s * 0.4, y - s * 0.5);
+    ctx.rotate(-0.5 + clawAngle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-s * 0.5, -s * 0.4);
+    ctx.moveTo(-s * 0.35, -s * 0.55);
+    ctx.lineTo(-s * 0.5, -s * 0.4);
+    ctx.lineTo(-s * 0.2, -s * 0.55);
+    ctx.stroke();
+    ctx.restore();
+
+    // Right claw
+    ctx.save();
+    ctx.translate(x + s * 0.4, y - s * 0.5);
+    ctx.rotate(0.5 - clawAngle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(s * 0.5, -s * 0.4);
+    ctx.moveTo(s * 0.35, -s * 0.55);
+    ctx.lineTo(s * 0.5, -s * 0.4);
+    ctx.lineTo(s * 0.2, -s * 0.55);
+    ctx.stroke();
+    ctx.restore();
+
+    // Eyes (two tiny dots)
+    if (alive) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(x - s * 0.2, y - s * 0.55, s * 0.12, 0, Math.PI * 2);
+      ctx.arc(x + s * 0.2, y - s * 0.55, s * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+      // Pupils
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(x - s * 0.18, y - s * 0.55, s * 0.06, 0, Math.PI * 2);
+      ctx.arc(x + s * 0.18, y - s * 0.55, s * 0.06, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Antennae (two thin whiskers)
+    ctx.strokeStyle = alive ? color : COLORS.dead;
+    ctx.lineWidth = Math.max(0.5, s * 0.12);
+    ctx.beginPath();
+    ctx.moveTo(x - s * 0.15, y - s * 0.7);
+    ctx.quadraticCurveTo(x - s * 0.6, y - s * 1.4, x - s * 0.8, y - s * 1.2);
+    ctx.moveTo(x + s * 0.15, y - s * 0.7);
+    ctx.quadraticCurveTo(x + s * 0.6, y - s * 1.4, x + s * 0.8, y - s * 1.2);
+    ctx.stroke();
+
+    // Legs (3 pairs, tiny)
+    ctx.lineWidth = Math.max(0.5, s * 0.1);
+    for (let i = 0; i < 3; i++) {
+      const legY = y + s * (-0.1 + i * 0.3);
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.5, legY);
+      ctx.lineTo(x - s * 0.85, legY + s * 0.2);
+      ctx.moveTo(x + s * 0.5, legY);
+      ctx.lineTo(x + s * 0.85, legY + s * 0.2);
+      ctx.stroke();
+    }
+  }, []);
+
   // Canvas rendering
   useEffect(() => {
     if (!state || !canvasRef.current) return;
@@ -183,6 +276,46 @@ function App() {
       ctx.fillRect(0, az.min * CELL, az.min * CELL, az.size * CELL);
       // Right strip
       ctx.fillRect((az.max + 1) * CELL, az.min * CELL, W - (az.max + 1) * CELL, az.size * CELL);
+    }
+
+    // Pheromone trails (food = green-cyan, danger = red)
+    if (state.pheromones) {
+      for (const p of state.pheromones) {
+        const alpha = p.type === "food"
+          ? p.intensity * 0.4
+          : p.intensity * 0.3;
+        ctx.fillStyle = p.type === "food"
+          ? `rgba(0, 255, 180, ${alpha})`
+          : `rgba(255, 50, 50, ${alpha})`;
+        ctx.fillRect(p.pos[0] * CELL, p.pos[1] * CELL, CELL, CELL);
+      }
+    }
+
+    // Colony territory indicators
+    if (state.colonies) {
+      for (const c of state.colonies) {
+        ctx.beginPath();
+        ctx.arc(
+          c.center[0] * CELL + CELL / 2,
+          c.center[1] * CELL + CELL / 2,
+          c.size * CELL * 0.8,
+          0, Math.PI * 2
+        );
+        ctx.strokeStyle = "rgba(255, 200, 50, 0.5)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Colony label
+        ctx.fillStyle = "rgba(255, 200, 50, 0.7)";
+        ctx.font = "9px Courier New";
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `Colony ${c.id} (${c.size})`,
+          c.center[0] * CELL,
+          c.center[1] * CELL - 5
+        );
+      }
     }
 
     // Communication lines (speaker → listener)
@@ -251,46 +384,63 @@ function App() {
       ctx.shadowBlur = 0;
     }
 
-    // Lobsters
+    // Lobsters (procedural micro-lobster sprites)
+    const t = Date.now();
     for (const lob of state.lobsters) {
       const lx = lob.pos[0] * CELL + CELL / 2;
       const ly = lob.pos[1] * CELL + CELL / 2;
-      const r = CELL * 0.45;
+      const s = CELL * 0.48;  // base scale
+      const isSpeaking = lob.speaking && lob.speaking.length > 0;
 
       if (!lob.alive) {
-        ctx.fillStyle = COLORS.dead;
-        ctx.globalAlpha = 0.4;
-        ctx.beginPath();
-        ctx.arc(lx, ly, r, 0, Math.PI * 2);
-        ctx.fill();
+        // Dead: faded, flipped upside-down lobster
+        ctx.save();
+        ctx.translate(lx, ly);
+        ctx.rotate(Math.PI);  // flipped
+        ctx.globalAlpha = 0.3;
+        drawLobster(ctx, 0, 0, s, COLORS.dead, false);
         ctx.globalAlpha = 1;
+        ctx.restore();
         continue;
       }
 
       const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
-      ctx.fillStyle = tierColor;
-      ctx.beginPath();
-      ctx.arc(lx, ly, r, 0, Math.PI * 2);
-      ctx.fill();
+
+      // Claw animation: speaking lobsters wiggle claws
+      const clawAngle = isSpeaking ? Math.sin(t / 80) * 0.4 : 0;
+
+      ctx.save();
+      ctx.translate(lx, ly);
+      drawLobster(ctx, 0, 0, s, tierColor, true, clawAngle);
+      ctx.restore();
+
+      // Colony indicator: tiny star above colony members
+      if (lob.colony) {
+        ctx.fillStyle = 'rgba(255, 200, 50, 0.8)';
+        ctx.font = `${Math.max(5, CELL * 0.4)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText('\u2605', lx, ly - s - 2);
+      }
 
       // Grace shield (pulsing cyan ring)
       if (lob.grace) {
-        const gPulse = 0.4 + 0.6 * Math.abs(Math.sin(Date.now() / 300));
+        const gPulse = 0.4 + 0.6 * Math.abs(Math.sin(t / 300));
         ctx.strokeStyle = `rgba(0, 212, 255, ${gPulse})`;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([2, 2]);
         ctx.beginPath();
-        ctx.arc(lx, ly, r + 4, 0, Math.PI * 2);
+        ctx.arc(lx, ly, s + 3, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
       }
 
-      // Speaking indicator
-      if (lob.speaking && lob.speaking.length > 0) {
-        ctx.strokeStyle = COLORS.sound;
-        ctx.lineWidth = 1.5;
+      // Speaking: sound wave rings
+      if (isSpeaking) {
+        const wave = (t % 800) / 800;
+        ctx.strokeStyle = `rgba(127, 219, 202, ${0.6 - wave * 0.6})`;
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(lx, ly, r + (lob.grace ? 7 : 3), 0, Math.PI * 2);
+        ctx.arc(lx, ly, s + 2 + wave * CELL * 1.5, 0, Math.PI * 2);
         ctx.stroke();
       }
 
@@ -299,13 +449,13 @@ function App() {
         ctx.strokeStyle = COLORS.gold;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(lx, ly, r + 5, 0, Math.PI * 2);
+        ctx.arc(lx, ly, s + 5, 0, Math.PI * 2);
         ctx.stroke();
 
         // Vision radius
-        const tier = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
+        const tierC = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
         const vision = lob.tier === 'kraken' ? 25 : lob.tier === 'lobster' ? 12 : 5;
-        ctx.strokeStyle = `${tier}44`;
+        ctx.strokeStyle = `${tierC}44`;
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
@@ -329,7 +479,7 @@ function App() {
       ctx.textAlign = 'center';
       ctx.fillText(ft.text, fx, fy);
     }
-  }, [state, selected, floatingTexts]);
+  }, [state, selected, floatingTexts, drawLobster]);
 
   // Animation loop for floating texts
   useEffect(() => {
@@ -468,6 +618,12 @@ function App() {
           <Row label="Predators" value={state.predators.length} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
           <Row label="Credits Earned" value={s.total_credits_earned?.toLocaleString()} />
           <Row label="Credits on Sounds" value={s.total_credits_spent_on_sounds?.toLocaleString()} />
+          {state.colonies && state.colonies.length > 0 && (
+            <Row label="Colonies" value={state.colonies.length} color={COLORS.gold} />
+          )}
+          {state.pheromones && (
+            <Row label="Trail Cells" value={state.pheromones.length} color="rgba(0,255,180,0.8)" />
+          )}
         </Panel>
 
         {/* Metrics */}
@@ -480,6 +636,11 @@ function App() {
             <Row label="MI" value={state.metrics.mutual_info?.toFixed(3)} color={state.metrics.mutual_info > 0.5 ? '#2ed573' : COLORS.text} />
             <Row label="Econ Delta" value={state.metrics.economic_delta?.toFixed(1)} color={state.metrics.economic_delta > 0 ? '#2ed573' : COLORS.predator} />
             <Row label="CSR" value={state.metrics.csr != null ? `${(state.metrics.csr * 100).toFixed(1)}%` : '-'} color={state.metrics.csr > 0.3 ? '#2ed573' : COLORS.text} />
+            {state.metrics.colony_count > 0 && (
+              <Row label="Colonies" value={`${state.metrics.colony_count} (avg ${state.metrics.avg_colony_size})`} color={COLORS.gold} />
+            )}
+            <Row label="Food Trails" value={state.metrics.food_trail_cells || 0} color="rgba(0,255,180,0.8)" />
+            <Row label="Danger Trails" value={state.metrics.danger_trail_cells || 0} color={COLORS.predator} />
             <div style={{ fontSize: 8, color: COLORS.textDim, marginTop: 4, textAlign: 'center' }}>
               CSR: heard sound → reached rift in 10 ticks
             </div>
@@ -723,6 +884,9 @@ function App() {
           <LegendItem color={COLORS.riftType.copper} label="Copper rift" shape="circle" />
           <LegendItem color={COLORS.predator} label="Predator" shape="triangle" />
           <LegendItem color={COLORS.accent} label="Grace shield (immune)" shape="circle" />
+          <LegendItem color="rgba(0,255,180,0.6)" label="Food trail" />
+          <LegendItem color="rgba(255,50,50,0.5)" label="Danger trail" />
+          <LegendItem color="rgba(255,200,50,0.7)" label="Colony territory" shape="circle" />
           <div style={{ marginTop: 4, borderTop: `1px solid ${COLORS.panelBorder}`, paddingTop: 4 }}>
             <LegendItem color={TYPE_COLOR.social} label="(S) Social" />
             <LegendItem color={TYPE_COLOR.greedy} label="(G) Greedy" />
