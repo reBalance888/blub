@@ -618,7 +618,7 @@ class SocialAgent(BlubAgent):
         current_epoch = state.get("epoch", 0)
         if current_epoch != self.last_epoch and self.last_epoch >= 0:
             old_s, new_s = self.production.anneal_sigma()
-            print(f"[{self.name}] σ anneal: {old_s:.3f} → {new_s:.3f} (epoch {current_epoch})")
+            print(f"[{self.name}] sigma anneal: {old_s:.3f} -> {new_s:.3f} (epoch {current_epoch})")
         self.last_epoch = current_epoch
 
         # Decay weights every 50 ticks
@@ -632,7 +632,7 @@ class SocialAgent(BlubAgent):
             top = self.production.top_sounds(ctx_key, n=3)
             top_info = {SOUNDS[i]: f"{p:.0%}" for i, p in top}
             w_info = [f"{w:.2f}" for w in self.production.W[0]]
-            print(f"[{self.name}] tick={state['tick']} σ={self.production.sigma:.2f} top={top_info} W0={w_info}")
+            print(f"[{self.name}] tick={state['tick']} sig={self.production.sigma:.2f} top={top_info} W0={w_info}")
 
         speak: list[str] = []
 

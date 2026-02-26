@@ -198,11 +198,12 @@ class Ocean:
         trail_reinforce = self.config.get("pheromones", {}).get("trail_reinforce", 0.05)
         for lob in self.lobsters.values():
             if lob.alive and lob.reward_this_tick > 0:
-                # Deposit along recent path (last 30 positions), not just current cell
-                path = lob.path_history[-30:]
+                # Deposit along recent path (last 10 positions) — ACO-style trail
+                path = lob.path_history[-10:]
                 if path:
-                    deposit_per_cell = min(lob.reward_this_tick * food_scale / len(path), 1.0)
-                    if deposit_per_cell > 0.005:
+                    total_deposit = lob.reward_this_tick * food_scale
+                    deposit_per_cell = min(total_deposit / len(path), 1.0)
+                    if deposit_per_cell > 0.001:
                         for px, py in path:
                             self.pheromone_map.deposit(px, py, "food", deposit_per_cell)
             # Trail reinforcement: positive feedback when following strong food trails
