@@ -56,7 +56,13 @@ async def tick_loop():
     """Main simulation loop."""
     while True:
         await asyncio.sleep(ocean.tick_interval)
-        ocean.process_tick()
+        try:
+            ocean.process_tick()
+        except Exception as e:
+            import traceback
+            print(f"[TICK_LOOP ERROR] tick={ocean.tick}: {e}")
+            traceback.print_exc()
+            continue
 
         # Broadcast viewer state
         viewer_state = ocean.get_viewer_state()
@@ -104,6 +110,15 @@ async def connect_agent(body: dict):
             "max": zone_max,
         },
     }
+
+
+@app.post("/disconnect")
+async def disconnect_agent(body: dict):
+    agent_id = body.get("agent_id")
+    if agent_id and agent_id in ocean.lobsters:
+        ocean.remove_lobster(agent_id)
+        return {"ok": True}
+    return JSONResponse({"error": "unknown agent"}, status_code=400)
 
 
 @app.post("/action")
@@ -159,6 +174,48 @@ async def get_stats():
             for l in top
         ],
     }
+
+
+@app.post("/knowledge/deposit")
+async def knowledge_deposit(body: dict):
+    agent_id = body.get("agent_id")
+    if not agent_id or agent_id not in ocean.lobsters:
+        return JSONResponse({"error": "unknown agent"}, status_code=400)
+    lob = ocean.lobsters[agent_id]
+    min_age = ocean.config.get("cultural_cache", {}).get("min_agent_age_to_contribute", 300)
+    if lob.age < min_age:
+        return JSONResponse({"error": f"agent too young (age={lob.age}, need {min_age})"}, status_code=400)
+    data = body.get("data", {})
+    ocean.cultural_cache.contribute(data, agent_id=agent_id)
+    return {"ok": True, "message": "deposit OK"}
+
+
+@app.get("/knowledge/bootstrap")
+async def knowledge_bootstrap():
+    return ocean.cultural_cache.bootstrap()
+
+
+@app.get("/knowledge/mentor")
+async def knowledge_mentor(agent_id: str = ""):
+    """Return knowledge snapshot from nearest experienced social agent (mentor)."""
+    lob = ocean.lobsters.get(agent_id)
+    if not lob:
+        return {"production": {}, "comprehension": {}}
+    # Find nearest social agent with age > 500 that has a snapshot
+    best_dist = float("inf")
+    best_snapshot = None
+    for other_id, other_lob in ocean.lobsters.items():
+        if other_id == agent_id:
+            continue
+        if other_lob.agent_type != "social" or other_lob.age < 500 or not other_lob.alive:
+            continue
+        if other_id not in ocean.cultural_cache.agent_snapshots:
+            continue
+        dist = abs(lob.x - other_lob.x) + abs(lob.y - other_lob.y)
+        if dist <= 15 and dist < best_dist:
+            best_dist = dist
+            best_snapshot = ocean.cultural_cache.agent_snapshots[other_id]
+    return best_snapshot or {"production": {}, "comprehension": {}}
 
 
 @app.post("/reset")

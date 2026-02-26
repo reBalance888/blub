@@ -9,10 +9,6 @@ import aiohttp
 SOUNDS = [
     "blub", "glorp", "skree", "klak", "mrrp",
     "woosh", "pop", "zzzub", "frrr", "tink",
-    "bloop", "squee", "drrrn", "gulp", "hiss",
-    "bonk", "splat", "chirr", "wub", "clonk",
-    "fizz", "grumble", "ping", "splish", "croak",
-    "zzzt", "plop", "whirr", "snap", "burble",
 ]
 
 
@@ -26,9 +22,11 @@ class BlubAgent:
         self.state: dict | None = None
         self.memory: dict = {}
         self.sound_model: dict = {}
+        self.local_age: int = 0
+        self._was_alive: bool = True  # track alive→dead transitions
 
     async def connect(self) -> dict:
-        """Connect to the ocean server."""
+        """Connect to the ocean server, then bootstrap from cultural cache."""
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.server_url}/connect",
@@ -36,7 +34,23 @@ class BlubAgent:
             ) as resp:
                 data = await resp.json()
                 self.agent_id = data["agent_id"]
-                return data
+                self.local_age = 0
+        # Bootstrap cultural knowledge (oblique transmission)
+        try:
+            bootstrap_data = await self.bootstrap_knowledge()
+            if bootstrap_data and bootstrap_data.get("production"):
+                self.on_bootstrap(bootstrap_data)
+        except Exception as e:
+            print(f"[{self.name}] Bootstrap failed (empty cache?): {e}")
+        # Mentor fallback (horizontal transmission)
+        try:
+            mentor_data = await self.get_mentor_knowledge()
+            if mentor_data:
+                self.on_mentor(mentor_data)
+        except Exception as e:
+            print(f"[{self.name}] Mentor fetch failed: {e}")
+        self._was_alive = True
+        return data
 
     async def get_state(self) -> dict:
         """Get current state from server."""
@@ -77,15 +91,77 @@ class BlubAgent:
         """
         pass
 
+    async def deposit_knowledge(self, data: dict) -> dict:
+        """POST knowledge to the cultural cache on the server."""
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.server_url}/knowledge/deposit",
+                json={"agent_id": self.agent_id, "data": data},
+            ) as resp:
+                return await resp.json()
+
+    async def bootstrap_knowledge(self) -> dict:
+        """GET bootstrapped knowledge from the cultural cache."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.server_url}/knowledge/bootstrap"
+            ) as resp:
+                return await resp.json()
+
+    async def get_mentor_knowledge(self) -> dict | None:
+        """GET knowledge from nearest experienced social agent (mentor system)."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.server_url}/knowledge/mentor",
+                params={"agent_id": self.agent_id},
+            ) as resp:
+                data = await resp.json()
+                if data.get("production"):
+                    return data
+                return None
+
+    async def on_death(self):
+        """Called when agent transitions from alive to dead.
+        Override in subclasses to deposit knowledge before death timeout."""
+        pass
+
+    def on_bootstrap(self, data: dict):
+        """Called after connect with bootstrapped cultural knowledge.
+        Override in subclasses to import knowledge."""
+        pass
+
+    def on_mentor(self, data: dict):
+        """Called after bootstrap with mentor's knowledge (horizontal transmission).
+        Override in subclasses to blend mentor knowledge at 15%."""
+        pass
+
+    async def on_pre_retire(self):
+        """Called before on_retired and reconnect.
+        Override in subclasses to deposit knowledge before death."""
+        pass
+
+    async def periodic_check(self, state: dict):
+        """Called after every action. Override for periodic deposits etc."""
+        pass
+
     def on_retired(self):
         """Called when the server flags this agent as retired.
         Override in subclasses to reset learned state (turnover)."""
         pass
 
     async def _reconnect(self):
-        """Disconnect and reconnect as a naive agent (turnover)."""
+        """Disconnect old lobster and reconnect as a naive agent (turnover)."""
         old_id = self.agent_id
         print(f"[{self.name}] Retiring {old_id}, reconnecting as naive...")
+        # Remove old lobster from server to prevent ghost accumulation
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    f"{self.server_url}/disconnect",
+                    json={"agent_id": old_id},
+                )
+        except Exception:
+            pass
         try:
             data = await self.connect()
             print(f"[{self.name}] Reborn as {self.agent_id}")
@@ -103,13 +179,21 @@ class BlubAgent:
 
                 # Check retirement signal from server
                 if state.get("retired", False):
+                    await self.on_pre_retire()
                     self.on_retired()
                     await self._reconnect()
                     continue
 
                 if not state.get("alive", True):
-                    await asyncio.sleep(1)
+                    # Detect alive→dead transition: deposit knowledge
+                    if self._was_alive:
+                        self._was_alive = False
+                        await self.on_death()
+                    await asyncio.sleep(0.1)
+                    self.local_age += 1
                     continue
+                else:
+                    self._was_alive = True
 
                 # Update language model
                 if state.get("sounds_heard"):
@@ -118,6 +202,10 @@ class BlubAgent:
                 # Think and act
                 action = self.think(state)
                 await self.do_action(**action)
+
+                # Periodic check (deposits etc.)
+                await self.periodic_check(state)
+                self.local_age += 1
 
                 # Telemetry every 50 ticks
                 if state.get("tick", 0) % 50 == 0:
@@ -128,4 +216,4 @@ class BlubAgent:
             except Exception as e:
                 print(f"[{self.name}] Error: {e}")
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)

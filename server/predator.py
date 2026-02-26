@@ -24,13 +24,15 @@ class PredatorManager:
         self.active_predators: list[Predator] = []
         self.next_pred_id: int = 1
 
-    def process_tick(self, lobster_positions: list[tuple[int, int]], ocean_size: int):
-        """Spawn new predators based on density, move existing ones, remove expired."""
+    def process_tick(self, lobster_positions: list[tuple[int, int]], ocean_size: int,
+                     rift_positions: list[tuple[int, int]] | None = None):
+        """Spawn new predators based on density (sigmoid), move existing ones, remove expired."""
         zone_size = self.config["predators"]["zone_size"]
-        base_rate = self.config["predators"]["base_spawn_rate"]
-        density_exp = self.config["predators"]["density_exponent"]
+        max_rate = self.config["predators"]["base_spawn_rate"]
+        K = self.config["predators"].get("sigmoid_K", 12)
         speed = self.config["predators"]["speed"]
         lifetime = self.config["predators"]["lifetime"]
+        rift_reduction = self.config["predators"].get("rift_zone_reduction", 0.6)
 
         # Count lobsters per zone
         zones: dict[tuple[int, int], int] = {}
@@ -39,9 +41,19 @@ class PredatorManager:
             zy = ly // zone_size
             zones[(zx, zy)] = zones.get((zx, zy), 0) + 1
 
-        # Spawn predators by density
+        # Spawn predators by density (Hill/sigmoid function)
         for (zx, zy), count in zones.items():
-            chance = min(0.5, base_rate * (count ** density_exp))
+            chance = max_rate * (count ** 2) / (K ** 2 + count ** 2)
+
+            # Reduce spawn rate near rifts
+            if rift_positions:
+                zone_cx = zx * zone_size + zone_size // 2
+                zone_cy = zy * zone_size + zone_size // 2
+                for rx, ry in rift_positions:
+                    if abs(zone_cx - rx) <= zone_size and abs(zone_cy - ry) <= zone_size:
+                        chance *= rift_reduction
+                        break
+
             if random.random() < chance:
                 # Spawn at zone edge
                 edge = random.choice(["top", "bottom", "left", "right"])
