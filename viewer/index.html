@@ -65,6 +65,7 @@ function App() {
   const [floatingTexts, setFloatingTexts] = useState([]);
   const wsRef = useRef(null);
   const canvasRef = useRef(null);
+  const canvasContainerRef = useRef(null);
   const floatIdRef = useRef(0);
 
   // WebSocket connection
@@ -253,11 +254,24 @@ function App() {
 
   // Canvas rendering — camera zoomed to active zone
   useEffect(() => {
-    if (!state || !canvasRef.current) return;
+    if (!state || !canvasRef.current || !canvasContainerRef.current) return;
     const canvas = canvasRef.current;
+    const container = canvasContainerRef.current;
+    const dpr = window.devicePixelRatio || 1;
+
+    // Fit canvas to container, respecting aspect ratio 1:1
+    const rect = container.getBoundingClientRect();
+    const cssSize = Math.min(rect.width, rect.height);
+    canvas.style.width = cssSize + 'px';
+    canvas.style.height = cssSize + 'px';
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+
     const ctx = canvas.getContext('2d');
-    const W = canvas.width;
-    const H = canvas.height;
+    ctx.scale(dpr, dpr);
+    // All drawing uses CSS pixel space (cssSize × cssSize)
+    const W = cssSize;
+    const H = cssSize;
 
     // Camera: zoom to active zone with 2-cell padding
     const az = state.active_zone || { min: 30, max: 69, size: 40 };
@@ -535,22 +549,22 @@ function App() {
     return () => cancelAnimationFrame(raf);
   }, [state]);
 
-  // Click handler (uses same camera as renderer)
+  // Click handler (uses same camera as renderer, in CSS pixel space)
   const handleCanvasClick = useCallback((e) => {
     if (!state) return;
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const mx = (e.clientX - rect.left) * scaleX;
-    const my = (e.clientY - rect.top) * scaleY;
+    // Convert to CSS pixels (same coordinate space as drawing)
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const cssSize = rect.width; // square canvas
 
     // Same camera math as renderer
     const az = state.active_zone || { min: 30, max: 69, size: 40 };
     const pad = 2;
     const camMin = Math.max(0, az.min - pad);
     const camSize = az.size + pad * 2;
-    const CELL = canvas.width / camSize;
+    const CELL = cssSize / camSize;
 
     let found = null;
     let minDist = Infinity;
@@ -588,19 +602,15 @@ function App() {
     <div style={{ display: 'flex', height: '100vh', gap: 0 }}>
       {/* Left: Ocean Canvas */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <div ref={canvasContainerRef} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', maxHeight: 'calc(100vh - 160px)' }}>
         <canvas
           ref={canvasRef}
-          width={700}
-          height={700}
           onClick={handleCanvasClick}
           style={{
-            flex: 1,
-            width: '100%',
-            maxHeight: 'calc(100vh - 160px)',
             cursor: 'crosshair',
-            imageRendering: 'pixelated',
           }}
         />
+        </div>
         {/* Sound log */}
         <div style={{
           height: 160,
