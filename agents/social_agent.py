@@ -600,19 +600,20 @@ class SocialAgent(BlubAgent):
         survived_predator = len(state.get("nearby_predators", [])) > 0 and state.get("alive", True)
 
         if self.last_sound_seq:
-            # pos0: spatial reward from rift credits
-            pos0_reward = max(0, delta)
+            # pos0: spatial reward from rift credits (allow negative = sound cost penalty)
+            pos0_reward = delta
             # pos1: social reward from group coordination + predator survival
             pos1_reward = group_delta * 5.0  # group hits are valuable
             if survived_predator:
                 pos1_reward += 3.0  # surviving near predator rewards social encoding
             if current_deaths > self.last_deaths:
-                pos1_reward = 0  # died = no social reward
-            if pos0_reward > 0 or pos1_reward > 0:
-                self.production.reinforce(
-                    self.last_ctx, self.last_sound_seq,
-                    [pos0_reward, pos1_reward],
-                )
+                pos1_reward = -2.0  # died = negative social signal
+            # Always reinforce when we spoke — agent must learn from both
+            # positive (near rift) AND negative (open water) outcomes
+            self.production.reinforce(
+                self.last_ctx, self.last_sound_seq,
+                [pos0_reward, pos1_reward],
+            )
 
         self.last_credits = current_credits
         self.last_group_hits = current_group
@@ -641,11 +642,11 @@ class SocialAgent(BlubAgent):
         speak: list[str] = []
 
         # Produce sounds based on current context
-        # Always speak near rifts/predators, 30% elsewhere
+        # Always speak near rifts/predators, 10% elsewhere (was 30% — too much noise)
         near_rift = bool(state.get("nearby_rifts"))
         near_predator = bool(state.get("nearby_predators"))
 
-        if near_rift or near_predator or random.random() < 0.3:
+        if near_rift or near_predator or random.random() < 0.10:
             # Compositional production: always 2-sound message
             sound_indices = self.production.produce(ctx_key)
             speak = [SOUNDS[i] for i in sound_indices]
