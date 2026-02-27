@@ -221,6 +221,21 @@ class Ocean:
                 if food_here > 0.5:
                     self.pheromone_map.deposit(lob.x, lob.y, "food", trail_reinforce)
 
+        # 3a2. No-entry pheromone: deposit when agent is at depleted rift (within rift radius)
+        ne_deposit = self.config.get("pheromones", {}).get("noentry_deposit", 1.5)
+        ne_threshold = self.config.get("pheromones", {}).get("noentry_richness_threshold", 0.10)
+        rift_radius = self.config["rifts"]["radius"]
+        for rift in self.rift_mgr.active_rifts:
+            max_richness = self.rift_mgr._richness_for_type(rift.rift_type)
+            if max_richness <= 0:
+                continue
+            pct = rift.richness / max_richness
+            if pct < ne_threshold:
+                self.pheromone_map.deposit(rift.x, rift.y, "noentry", ne_deposit)
+                for lob in self.lobsters.values():
+                    if lob.alive and abs(lob.x - rift.x) <= rift_radius and abs(lob.y - rift.y) <= rift_radius:
+                        self.pheromone_map.deposit(lob.x, lob.y, "noentry", ne_deposit)
+
         # 3b. Decrement grace ticks & increment age
         turnover_enabled = self.config.get("ablation", {}).get("turnover", True)
         agent_lifetime = self.config.get("agents", {}).get("agent_lifetime", 3000)
@@ -251,6 +266,11 @@ class Ocean:
         for kx, ky in kill_positions:
             self.pheromone_map.deposit(kx, ky, "danger", danger_amt)
 
+        # 5c. No-entry at dying rifts (richness <= 0): strong mark
+        for rift in self.rift_mgr.active_rifts:
+            if rift.richness <= 0:
+                self.pheromone_map.deposit(rift.x, rift.y, "noentry", ne_deposit * 2)
+
         # 6. Rift depletion & respawn
         self.rift_mgr.tick_rifts(self.tick)
 
@@ -263,6 +283,21 @@ class Ocean:
         # 7c. Colony detection
         rift_positions = [(r.x, r.y, r.id) for r in self.rift_mgr.active_rifts]
         self.colony_mgr.tick(self.lobsters, rift_positions, self.tick)
+
+        # 7d. Colony scent deposits: members deposit at position + 4 cardinal neighbors
+        cs_deposit = self.config.get("pheromones", {}).get("colony_scent_deposit", 0.5)
+        cs_neighbor = self.config.get("pheromones", {}).get("colony_scent_neighbor_deposit", 0.2)
+        for colony in self.colony_mgr.colonies.values():
+            for member_id in colony.members:
+                lob = self.lobsters.get(member_id)
+                if not lob or not lob.alive:
+                    continue
+                # Center cell
+                self.pheromone_map.deposit_colony_scent(lob.x, lob.y, colony.id, cs_deposit)
+                # Cardinal neighbors
+                for nx, ny in [(lob.x+1, lob.y), (lob.x-1, lob.y),
+                               (lob.x, lob.y+1), (lob.x, lob.y-1)]:
+                    self.pheromone_map.deposit_colony_scent(nx, ny, colony.id, cs_neighbor)
 
         # 8. Check epoch end
         if self.epoch_mgr.tick():
@@ -291,6 +326,8 @@ class Ocean:
                 avg_colony_size=avg_col_size,
                 food_trail_cells=len(self.pheromone_map.food_trails),
                 danger_trail_cells=len(self.pheromone_map.danger_trails),
+                noentry_trail_cells=len(self.pheromone_map.noentry_trails),
+                colony_scent_cells=len(self.pheromone_map.colony_scent),
             )
 
     def _process_movements(self):
@@ -710,10 +747,11 @@ class Ocean:
         """Determine context for a speaking lobster (server-side ground truth)."""
         contexts: set[str] = set()
 
-        # Near rift?
+        # Near rift? — include rift type for richer vocabulary
         for rift in self.rift_mgr.active_rifts:
             if abs(lob.x - rift.x) <= rift_radius and abs(lob.y - rift.y) <= rift_radius:
                 contexts.add("near_rift")
+                contexts.add(f"near_{rift.rift_type}")  # near_gold, near_silver, near_copper
                 break
 
         # Near predator?
@@ -900,7 +938,15 @@ class Ocean:
         # Nearby pheromones (within vision radius)
         nearby_food_trails = self.pheromone_map.read(lob.x, lob.y, "food", vision)
         nearby_danger_trails = self.pheromone_map.read(lob.x, lob.y, "danger", vision)
-        in_colony = self.colony_mgr.get_colony_for(agent_id) is not None
+        nearby_noentry_trails = self.pheromone_map.read(lob.x, lob.y, "noentry", vision)
+        colony = self.colony_mgr.get_colony_for(agent_id)
+        in_colony = colony is not None
+        my_colony_id = colony.id if colony else None
+        same_w = self.config.get("pheromones", {}).get("same_colony_weight", 1.0)
+        other_w = self.config.get("pheromones", {}).get("other_colony_weight", 0.3)
+        nearby_colony_scent = self.pheromone_map.read_colony_scent(
+            lob.x, lob.y, vision, my_colony_id, same_w, other_w
+        )
 
         # Sounds heard (within sound_range) — with channel noise
         noise_rate = self.config.get("communication", {}).get("channel_noise_rate", 0.0)
@@ -948,7 +994,10 @@ class Ocean:
             "deaths_this_epoch": lob.deaths_this_epoch,
             "nearby_food_trails": nearby_food_trails,
             "nearby_danger_trails": nearby_danger_trails,
+            "nearby_noentry_trails": nearby_noentry_trails,
+            "nearby_colony_scent": nearby_colony_scent,
             "my_colony": in_colony,
+            "my_colony_id": my_colony_id,
         }
 
     # ----- Viewer state -----

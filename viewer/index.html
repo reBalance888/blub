@@ -753,6 +753,13 @@ function App() {
       ctx.setLineDash([]);
 
       // ═══ LAYER 1: PHEROMONE TRAILS ═══
+      const COLONY_COLORS = [
+        [0, 220, 255],   // cyan
+        [180, 100, 255], // purple
+        [255, 200, 50],  // gold
+        [100, 255, 180], // mint
+        [255, 130, 180], // pink
+      ];
       if (st.pheromones) {
         ctx.globalCompositeOperation = 'lighter';
         for (const p of st.pheromones) {
@@ -762,8 +769,14 @@ function App() {
           const r = Math.max(2, CELL * (0.4 + intensity * 0.4));
           if (p.type === 'food') {
             ctx.fillStyle = `rgba(0, 230, 118, ${Math.min(0.4, intensity * 0.3)})`;
-          } else {
+          } else if (p.type === 'danger') {
             ctx.fillStyle = `rgba(255, 68, 68, ${Math.min(0.35, intensity * 0.25)})`;
+          } else if (p.type === 'noentry') {
+            ctx.fillStyle = `rgba(255, 80, 0, ${Math.min(0.5, intensity * 0.4)})`;
+          } else if (p.type === 'colony_scent') {
+            const cIdx = parseInt(String(p.colony_id).replace(/\D/g,'')) || 0;
+            const [cr, cg, cb] = COLONY_COLORS[cIdx % COLONY_COLORS.length];
+            ctx.fillStyle = `rgba(${cr}, ${cg}, ${cb}, ${Math.min(0.3, intensity * 0.25)})`;
           }
           ctx.beginPath();
           ctx.arc(px, py, r, 0, Math.PI * 2);

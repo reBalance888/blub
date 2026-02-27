@@ -89,6 +89,15 @@ pheromones:
   food_deposit_scale: 0.10  # reward → deposit multiplier (5x for visible trails)
   danger_deposit: 3.0       # fixed deposit on death
   trail_reinforce: 0.05     # positive feedback when lobster follows food trail
+  noentry_decay_rate: 0.93              # ~10 tick half-life: covers next-wave arrival window without blocking respawned rifts
+  noentry_deposit: 1.5                  # at depleted rifts
+  noentry_richness_threshold: 0.85      # rift <85% richness triggers no-entry
+  noentry_food_penalty_multiplier: 2.0  # effective = food - noentry * this
+  colony_scent_decay_rate: 0.95         # ~14 tick half-life
+  colony_scent_deposit: 0.5             # center cell deposit by colony members
+  colony_scent_neighbor_deposit: 0.2    # cardinal neighbor deposit (radius-1 spread)
+  same_colony_weight: 1.0              # trust own colony food trails
+  other_colony_weight: 0.3             # distrust foreign food trails
 
 colonies:
   formation_threshold: 4    # min agents to form

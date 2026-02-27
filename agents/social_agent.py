@@ -669,17 +669,30 @@ class SocialAgent(BlubAgent):
             self.last_sound_seq = []
             self.last_ctx = ctx_key
 
-        # Movement priority: flee predators > heard rift sounds > visible rift >
-        #                    follow food pheromone > avoid danger pheromone > random walk
+        # Build no-entry lookup for quick access: {(dx,dy): intensity}
+        noentry_map = {}
+        for ne in state.get("nearby_noentry_trails", []):
+            key = (ne["dx"], ne["dy"])
+            noentry_map[key] = max(noentry_map.get(key, 0), ne["intensity"])
+
+        # Movement priority:
+        # 1. Flee predators
+        # 2. Follow heard rift sounds
+        # 3. Move toward visible rift (filter out strong no-entry)
+        # 4. Follow food pheromone (dampen by no-entry)
+        # 5. Follow same-colony scent (homing)
+        # 6. Avoid danger pheromone
+        # 7. Avoid other-colony scent
+        # 8. Random walk
+
+        # Priority 1: flee predators
         if near_predator:
             pred = state["nearby_predators"][0]
             dx, dy = pred["relative"]
-            # Also factor in danger pheromone — stronger flee if danger trails nearby
             move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
             return {"move": move, "speak": speak, "act": None}
 
-        # If heard sounds that mean "near rift" — go toward the speaker
-        # Check sequences first (more specific), then individual sounds
+        # Priority 2: heard sounds that mean "near rift" — go toward the speaker
         for event in state.get("sounds_heard", []):
             seq_indices = tuple(
                 SOUNDS.index(s) for s in event["sounds"] if s in SOUNDS
@@ -705,44 +718,92 @@ class SocialAgent(BlubAgent):
                             move = "stay"
                         return {"move": move, "speak": speak, "act": None}
 
-        # Move toward nearest rift
+        # Priority 3: move toward nearest rift — filter out rifts with strong no-entry
         rifts = state.get("nearby_rifts", [])
         if rifts:
-            closest = min(rifts, key=lambda r: abs(r["relative"][0]) + abs(r["relative"][1]))
-            dx, dy = closest["relative"]
-            if dx > 0:
-                move = "east"
-            elif dx < 0:
-                move = "west"
-            elif dy > 0:
-                move = "south"
-            elif dy < 0:
-                move = "north"
-            else:
-                move = "stay"
-        else:
-            # Priority 4: follow food pheromone gradient
-            food_trails = state.get("nearby_food_trails", [])
-            if food_trails:
-                best = max(food_trails, key=lambda t: t["intensity"])
-                dx, dy = best["dx"], best["dy"]
+            # Filter: skip rifts where no-entry intensity at rift cell > 0.5
+            valid_rifts = []
+            for r in rifts:
+                ne_at_rift = noentry_map.get((r["relative"][0], r["relative"][1]), 0)
+                if ne_at_rift <= 0.5:
+                    valid_rifts.append(r)
+            if valid_rifts:
+                closest = min(valid_rifts, key=lambda r: abs(r["relative"][0]) + abs(r["relative"][1]))
+                dx, dy = closest["relative"]
+                if dx > 0:
+                    move = "east"
+                elif dx < 0:
+                    move = "west"
+                elif dy > 0:
+                    move = "south"
+                elif dy < 0:
+                    move = "north"
+                else:
+                    move = "stay"
+                return {"move": move, "speak": speak, "act": None}
+
+        # Priority 4: follow food pheromone gradient — dampen by no-entry
+        noentry_penalty_mult = 2.0  # TODO: move to state if tuning needed
+        food_trails = state.get("nearby_food_trails", [])
+        if food_trails:
+            best_food = None
+            best_effective = -999.0
+            for t in food_trails:
+                ne_here = noentry_map.get((t["dx"], t["dy"]), 0)
+                effective = t["intensity"] - ne_here * noentry_penalty_mult
+                if effective > best_effective:
+                    best_effective = effective
+                    best_food = t
+            if best_food and best_effective > 0:
+                dx, dy = best_food["dx"], best_food["dy"]
                 if abs(dx) >= abs(dy):
                     move = "east" if dx > 0 else "west"
                 else:
                     move = "south" if dy > 0 else "north"
-            else:
-                # Priority 5: avoid danger pheromone zones
-                danger = state.get("nearby_danger_trails", [])
-                if danger:
-                    worst = max(danger, key=lambda t: t["intensity"])
-                    dx, dy = worst["dx"], worst["dy"]
-                    # Move AWAY from strongest danger
-                    if abs(dx) >= abs(dy):
-                        move = "west" if dx > 0 else "east"
-                    else:
-                        move = "north" if dy > 0 else "south"
+                return {"move": move, "speak": speak, "act": None}
+
+        # Priority 5: follow same-colony scent (homing to territory)
+        colony_scent = state.get("nearby_colony_scent", [])
+        same_colony = [c for c in colony_scent
+                       if c["trust"] >= 1.0 and c["intensity"] > 0.5]
+        if same_colony:
+            best = max(same_colony, key=lambda c: c["intensity"])
+            dx, dy = best["dx"], best["dy"]
+            if dx != 0 or dy != 0:
+                if abs(dx) >= abs(dy):
+                    move = "east" if dx > 0 else "west"
                 else:
-                    move = random.choice(["north", "south", "east", "west"])
+                    move = "south" if dy > 0 else "north"
+                return {"move": move, "speak": speak, "act": None}
+
+        # Priority 6: avoid danger pheromone zones
+        danger = state.get("nearby_danger_trails", [])
+        if danger:
+            worst = max(danger, key=lambda t: t["intensity"])
+            dx, dy = worst["dx"], worst["dy"]
+            # Move AWAY from strongest danger
+            if abs(dx) >= abs(dy):
+                move = "west" if dx > 0 else "east"
+            else:
+                move = "north" if dy > 0 else "south"
+            return {"move": move, "speak": speak, "act": None}
+
+        # Priority 7: avoid other-colony scent (territory respect)
+        other_colony = [c for c in colony_scent
+                        if c["trust"] < 1.0 and c["intensity"] > 0.3]
+        if other_colony:
+            worst = max(other_colony, key=lambda c: c["intensity"])
+            dx, dy = worst["dx"], worst["dy"]
+            if dx != 0 or dy != 0:
+                # Move AWAY from foreign territory
+                if abs(dx) >= abs(dy):
+                    move = "west" if dx > 0 else "east"
+                else:
+                    move = "north" if dy > 0 else "south"
+                return {"move": move, "speak": speak, "act": None}
+
+        # Priority 8: random walk
+        move = random.choice(["north", "south", "east", "west"])
 
         return {"move": move, "speak": speak, "act": None}
 
