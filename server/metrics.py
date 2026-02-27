@@ -41,7 +41,8 @@ class MetricsLogger:
                 cic_silent_events: int = 0, cic_silent_moved: int = 0,
                 colony_count: int = 0, avg_colony_size: float = 0,
                 food_trail_cells: int = 0, danger_trail_cells: int = 0,
-                noentry_trail_cells: int = 0, colony_scent_cells: int = 0) -> dict:
+                noentry_trail_cells: int = 0, colony_scent_cells: int = 0,
+                **extra) -> dict:
         """Compute all metrics. Called every 100 ticks."""
         csr = round(csr_successes / csr_heard, 4) if csr_heard > 0 else 0.0
         social_csr = round(csr_social_successes / csr_social_heard, 4) if csr_social_heard > 0 else 0.0
@@ -85,6 +86,8 @@ class MetricsLogger:
             "noentry_trail_cells": noentry_trail_cells,
             "colony_scent_cells": colony_scent_cells,
         }
+        if extra:
+            result.update(extra)
         self.latest = result
 
         # Append to JSONL file

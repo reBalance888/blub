@@ -36,6 +36,33 @@ predators:
   lifetime: 30
   zone_size: 10
   grace_period: 30
+  types:
+    shark:
+      speed: 1.7
+      lethality: 0.80
+      lifetime: 30
+      spawn_weight: 0.50
+      min_rift_distance: 8
+      behavior: chase
+    eel:
+      speed: 0.0
+      lethality: 0.60
+      lifetime: 50
+      spawn_weight: 0.35
+      max_rift_distance: 2
+      behavior: ambush
+      respawn_delay: 10
+      attack_radius: 2
+    octopus:
+      speed: 0.5
+      lethality: 0.50
+      lifetime: 40
+      spawn_weight: 0.15
+      behavior: pheromone_follow
+      pheromone_weight: 0.6
+      pheromone_clear_radius: 3
+  min_population_for_predators: 20
+  extinction_protection: true
 
 economy:
   total_supply: 1000000000
@@ -126,6 +153,16 @@ language:
   sigma_anneal_per_epoch: 0.02
   topo_bonus_scale: 4.0
   weight_decay: 0.9995
+
+tidal:
+  enabled: true                    # kill switch for A/B testing
+  day_night_period: 50             # ticks per full day/night cycle
+  day_night_predator_max: 2.0      # night predator spawn multiplier
+  day_night_sound_min: 0.4         # night sound range multiplier
+  tidal_period: 200                # ticks per tidal cycle
+  tidal_offset_max: 2              # max rift offset cells at respawn
+  seasonal_period: 1000            # ticks per seasonal cycle
+  seasonal_min_multiplier: 0.5     # winter richness multiplier
 
 auto_balance:
   enabled: true

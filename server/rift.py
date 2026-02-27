@@ -90,7 +90,7 @@ class RiftManager:
         self._zone_min = zone_min
         self._zone_size = zone_size
 
-    def tick_rifts(self, current_tick: int):
+    def tick_rifts(self, current_tick: int, tidal_offset: tuple[int, int] = (0, 0)):
         """Remove depleted rifts and respawn if interval elapsed."""
         self.active_rifts = [r for r in self.active_rifts if r.richness > 0]
 
@@ -102,8 +102,11 @@ class RiftManager:
                 self.next_rift_id += 1
                 zm = getattr(self, '_zone_min', 0)
                 zs = getattr(self, '_zone_size', 100)
-                x = random.randint(zm, zm + zs - 1)
-                y = random.randint(zm, zm + zs - 1)
+                x = random.randint(zm, zm + zs - 1) + tidal_offset[0]
+                y = random.randint(zm, zm + zs - 1) + tidal_offset[1]
+                # Clamp to active zone
+                x = max(zm, min(zm + zs - 1, x))
+                y = max(zm, min(zm + zs - 1, y))
                 rtype = self._pick_rift_type()
                 self.active_rifts.append(
                     Rift(id=rid, x=x, y=y, richness=self._richness_for_type(rtype),

@@ -76,6 +76,9 @@ const COLORS = {
   signal: '#FFE082',
   predator: '#FF4444',
   predatorDark: '#990000',
+  shark: '#FF4444',
+  eel: '#00E676',
+  octopus: '#B388FF',
   riftType: {
     gold:   '#ffd700',
     silver: '#c0c0c0',
@@ -752,6 +755,13 @@ function App() {
       ctx.strokeRect(zx, zy, zs, zs);
       ctx.setLineDash([]);
 
+      // ═══ LAYER 0.5: NIGHT OVERLAY ═══
+      if (st.tidal && st.tidal.day_night_phase > 0.3) {
+        const nightAlpha = Math.min(0.35, (st.tidal.day_night_phase - 0.3) * 0.5);
+        ctx.fillStyle = `rgba(0, 0, 40, ${nightAlpha})`;
+        ctx.fillRect(0, 0, W, W);
+      }
+
       // ═══ LAYER 1: PHEROMONE TRAILS ═══
       const COLONY_COLORS = [
         [0, 220, 255],   // cyan
@@ -949,31 +959,84 @@ function App() {
         }
       }
 
-      // ═══ LAYER 6: PREDATORS ═══
+      // ═══ LAYER 6: PREDATORS (type-dispatched) ═══
       for (const pred of st.predators) {
         const px = Math.round(w2sx(pred.pos[0]) + CELL / 2);
         const py = Math.round(w2sy(pred.pos[1]) + CELL / 2);
         const s = Math.max(4, CELL * 0.6);
+        const ptype = pred.type || 'shark';
+        const pcolor = ptype === 'eel' ? COLORS.eel : ptype === 'octopus' ? COLORS.octopus : COLORS.shark;
 
-        // Predator glow (pre-rendered)
+        // Glow (pre-rendered, type-colored)
         const pGlowSize = Math.round(Math.max(20, CELL * 2.5));
-        const pGlow = getGlow(COLORS.predator, pGlowSize);
+        const pGlow = getGlow(pcolor, pGlowSize);
         ctx.globalCompositeOperation = 'lighter';
-        const pulseFactor = 0.7 + 0.3 * Math.sin(t / 200);
+        const pulseFactor = (ptype === 'eel' && pred.cooldown)
+          ? 0.3 + 0.7 * Math.abs(Math.sin(t / 80))  // fast pulse when eel in cooldown
+          : 0.7 + 0.3 * Math.sin(t / 200);
         ctx.globalAlpha = pulseFactor;
         ctx.drawImage(pGlow, Math.round(px - pGlowSize / 2), Math.round(py - pGlowSize / 2));
         ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = 'source-over';
 
-        // Body: dark core circle + red outer
-        ctx.fillStyle = COLORS.predator;
-        ctx.beginPath(); ctx.arc(px, py, s * 0.6, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = COLORS.predatorDark;
-        ctx.beginPath(); ctx.arc(px, py, s * 0.3, 0, Math.PI * 2); ctx.fill();
+        if (ptype === 'shark') {
+          // Shark: red triangle pointed up
+          ctx.fillStyle = pcolor;
+          ctx.beginPath();
+          ctx.moveTo(px, py - s * 0.7);
+          ctx.lineTo(px - s * 0.5, py + s * 0.5);
+          ctx.lineTo(px + s * 0.5, py + s * 0.5);
+          ctx.closePath();
+          ctx.fill();
+          // Dark core
+          ctx.fillStyle = COLORS.predatorDark;
+          ctx.beginPath();
+          ctx.moveTo(px, py - s * 0.3);
+          ctx.lineTo(px - s * 0.2, py + s * 0.2);
+          ctx.lineTo(px + s * 0.2, py + s * 0.2);
+          ctx.closePath();
+          ctx.fill();
+        } else if (ptype === 'eel') {
+          // Eel: green diamond
+          ctx.fillStyle = pcolor;
+          ctx.beginPath();
+          ctx.moveTo(px, py - s * 0.7);
+          ctx.lineTo(px + s * 0.4, py);
+          ctx.lineTo(px, py + s * 0.7);
+          ctx.lineTo(px - s * 0.4, py);
+          ctx.closePath();
+          ctx.fill();
+          // Inner highlight
+          ctx.fillStyle = '#004D25';
+          ctx.beginPath();
+          ctx.moveTo(px, py - s * 0.3);
+          ctx.lineTo(px + s * 0.15, py);
+          ctx.lineTo(px, py + s * 0.3);
+          ctx.lineTo(px - s * 0.15, py);
+          ctx.closePath();
+          ctx.fill();
+        } else if (ptype === 'octopus') {
+          // Octopus: purple circle + 4 rotating tentacle lines
+          ctx.fillStyle = pcolor;
+          ctx.beginPath(); ctx.arc(px, py, s * 0.45, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = '#7C4DFF';
+          ctx.beginPath(); ctx.arc(px, py, s * 0.2, 0, Math.PI * 2); ctx.fill();
+          // 4 tentacles (rotating)
+          ctx.strokeStyle = pcolor;
+          ctx.lineWidth = Math.max(1, s * 0.1);
+          const tentRot = t / 500;
+          for (let ti = 0; ti < 4; ti++) {
+            const a = tentRot + (ti * Math.PI / 2);
+            ctx.beginPath();
+            ctx.moveTo(px + Math.cos(a) * s * 0.45, py + Math.sin(a) * s * 0.45);
+            ctx.lineTo(px + Math.cos(a) * s * 0.9, py + Math.sin(a) * s * 0.9);
+            ctx.stroke();
+          }
+        }
 
-        // Eye
+        // Eye (all types)
         ctx.fillStyle = '#fff';
-        ctx.beginPath(); ctx.arc(px, py - s * 0.15, Math.max(1, s * 0.12), 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(px, py - s * 0.15, Math.max(1, s * 0.1), 0, Math.PI * 2); ctx.fill();
       }
 
       // ═══ LAYER 7: EFFECT PARTICLES ═══
@@ -1016,6 +1079,26 @@ function App() {
         ctx.font = '10px monospace';
         ctx.textAlign = 'left';
         ctx.fillText('Manual cam | F = reset | Dbl-click', 12, 22);
+      }
+
+      // ═══ TIDAL HUD (bottom-right overlay on canvas) ═══
+      if (st.tidal) {
+        const td = st.tidal;
+        const isNight = td.day_night_phase > 0.5;
+        const seasonLabel = td.seasonal_multiplier < 0.7 ? 'Winter' : td.seasonal_multiplier > 0.9 ? 'Summer' : 'Spring';
+        const hudW = 110, hudH = 36;
+        const hudX = W - hudW - 8, hudY = W - hudH - 8;
+        ctx.fillStyle = 'rgba(0, 12, 24, 0.6)';
+        ctx.fillRect(hudX, hudY, hudW, hudH);
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'left';
+        // Day/Night icon + season
+        ctx.fillStyle = isNight ? '#6688BB' : COLORS.gold;
+        ctx.fillText(isNight ? 'Night' : 'Day', hudX + 4, hudY + 13);
+        ctx.fillStyle = td.seasonal_multiplier > 0.8 ? '#69F0AE' : '#6688BB';
+        ctx.fillText(seasonLabel + ' ' + td.seasonal_multiplier + 'x', hudX + 42, hudY + 13);
+        ctx.fillStyle = '#8899AA';
+        ctx.fillText('Tide: ' + (td.tidal_dx >= 0 ? '+' : '') + td.tidal_dx + ',' + (td.tidal_dy >= 0 ? '+' : '') + td.tidal_dy, hudX + 4, hudY + 28);
       }
 
       raf = requestAnimationFrame(animate);
@@ -1069,12 +1152,28 @@ function App() {
             <Row label="Epoch Pool" value={`${(s.epoch_pool || 0).toLocaleString()} BLUB`} color={COLORS.gold} />
           </Panel>
 
+          {/* Tidal info */}
+          {state.tidal && (
+            <Panel title="TIDAL">
+              <Row label="Day/Night" value={state.tidal.day_night_phase > 0.5 ? 'Night' : 'Day'} color={state.tidal.day_night_phase > 0.5 ? '#6688BB' : COLORS.gold} />
+              <Row label="Season" value={`${state.tidal.seasonal_multiplier < 0.7 ? 'Winter' : state.tidal.seasonal_multiplier > 0.9 ? 'Summer' : 'Spring'} (${state.tidal.seasonal_multiplier}x)`} color={state.tidal.seasonal_multiplier > 0.8 ? '#69F0AE' : '#6688BB'} />
+              <Row label="Tidal Offset" value={`${state.tidal.tidal_dx >= 0 ? '+' : ''}${state.tidal.tidal_dx}, ${state.tidal.tidal_dy >= 0 ? '+' : ''}${state.tidal.tidal_dy}`} />
+            </Panel>
+          )}
+
           {/* World stats */}
           <Panel title="WORLD">
             <Row label="Active Zone" value={state.active_zone ? `${state.active_zone.size}x${state.active_zone.size}` : '?'} color={COLORS.accent} />
             <Row label="Lobsters" value={`${s.alive_lobsters} / ${s.total_lobsters}`} />
             <Row label="Rifts" value={s.active_rifts} color={COLORS.accent} />
-            <Row label="Predators" value={state.predators.length} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
+            <Row label="Predators" value={(() => {
+              const total = state.predators.length;
+              if (total === 0) return '0';
+              const s = state.predators.filter(p => (p.type || 'shark') === 'shark').length;
+              const e = state.predators.filter(p => p.type === 'eel').length;
+              const o = state.predators.filter(p => p.type === 'octopus').length;
+              return `${total} (S:${s} E:${e} O:${o})`;
+            })()} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
             {state.colonies && state.colonies.length > 0 && (
               <Row label="Colonies" value={state.colonies.length} color={COLORS.gold} />
             )}
@@ -1203,7 +1302,9 @@ function App() {
             <LegendItem color={COLORS.riftType.silver} label="Silver rift" />
             <LegendItem color={COLORS.riftType.copper} label="Copper rift" />
             <div style={{ height: 4 }} />
-            <LegendItem color={COLORS.predator} label="Predator" />
+            <LegendItem color={COLORS.shark} label="Shark" />
+            <LegendItem color={COLORS.eel} label="Eel" />
+            <LegendItem color={COLORS.octopus} label="Octopus" />
             <LegendItem color={COLORS.food} label="Food trail" />
             <LegendItem color="#FF6B6B" label="Danger trail" />
             <LegendItem color="rgba(255,200,50,0.7)" label="Colony" />

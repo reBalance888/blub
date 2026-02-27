@@ -408,6 +408,9 @@ class SocialAgent(BlubAgent):
         self.topo_bonus_scale: float = self.language_cfg.get("topo_bonus_scale", 4.0)
         # Topographic tracking: recent (message_tuple, ctx_key) pairs
         self._msg_history: list[tuple[tuple, tuple]] = []
+        # Predator mosaic: eel memory and octopus pheromone suppression
+        self._eel_memory: list[tuple[int, int, int]] = []  # (x, y, expiry_tick), max 5
+        self._pheromone_suppress_until: int = 0
 
     @staticmethod
     def _heading(relative: list[int]) -> int:
@@ -685,11 +688,51 @@ class SocialAgent(BlubAgent):
         # 7. Avoid other-colony scent
         # 8. Random walk
 
-        # Priority 1: flee predators
+        # Priority 1: flee predators (type-aware)
         if near_predator:
             pred = state["nearby_predators"][0]
             dx, dy = pred["relative"]
-            move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
+            ptype = pred.get("type", "shark")
+            current_tick = state.get("tick", 0)
+
+            if ptype == "shark":
+                # Perpendicular flee: two options (-dy,dx) and (dy,-dx), pick one closer to center
+                my_pos = state.get("my_position", [0, 0])
+                opt1 = (-dy, dx)
+                opt2 = (dy, -dx)
+                # Pick option that moves toward center (away from edges)
+                center = 25  # approximate center
+                d1 = abs(my_pos[0] + opt1[0] - center) + abs(my_pos[1] + opt1[1] - center)
+                d2 = abs(my_pos[0] + opt2[0] - center) + abs(my_pos[1] + opt2[1] - center)
+                fdx, fdy = opt1 if d1 <= d2 else opt2
+                if fdx == 0 and fdy == 0:
+                    fdx, fdy = -dx, -dy  # fallback: direct away
+                if abs(fdx) >= abs(fdy):
+                    move = "east" if fdx > 0 else "west"
+                else:
+                    move = "south" if fdy > 0 else "north"
+
+            elif ptype == "eel":
+                # Direct flee + remember eel position
+                move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
+                eel_x = int(pred.get("position", [0, 0])[0])
+                eel_y = int(pred.get("position", [0, 0])[1])
+                self._eel_memory.append((eel_x, eel_y, current_tick + 20))
+                if len(self._eel_memory) > 5:
+                    self._eel_memory = self._eel_memory[-5:]
+
+            elif ptype == "octopus":
+                # Scatter: random direction excluding toward octopus
+                options = ["north", "south", "east", "west"]
+                toward = "east" if dx > 0 else "west" if dx < 0 else "south" if dy > 0 else "north"
+                options = [d for d in options if d != toward]
+                move = random.choice(options) if options else "north"
+                self._pheromone_suppress_until = current_tick + 5
+
+            else:
+                # Unknown type: direct flee
+                move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
+
             return {"move": move, "speak": speak, "act": None}
 
         # Priority 2: heard sounds that mean "near rift" — go toward the speaker
@@ -727,6 +770,21 @@ class SocialAgent(BlubAgent):
                 ne_at_rift = noentry_map.get((r["relative"][0], r["relative"][1]), 0)
                 if ne_at_rift <= 0.5:
                     valid_rifts.append(r)
+            # Filter out rifts near remembered eel positions
+            current_tick = state.get("tick", 0)
+            self._eel_memory = [(x, y, exp) for x, y, exp in self._eel_memory if exp > current_tick]
+            if self._eel_memory and valid_rifts:
+                my_pos = state.get("my_position", [0, 0])
+                safe_rifts = []
+                for r in valid_rifts:
+                    rx = my_pos[0] + r["relative"][0]
+                    ry = my_pos[1] + r["relative"][1]
+                    near_eel = any(abs(rx - ex) <= 2 and abs(ry - ey) <= 2
+                                   for ex, ey, _ in self._eel_memory)
+                    if not near_eel:
+                        safe_rifts.append(r)
+                if safe_rifts:
+                    valid_rifts = safe_rifts
             if valid_rifts:
                 closest = min(valid_rifts, key=lambda r: abs(r["relative"][0]) + abs(r["relative"][1]))
                 dx, dy = closest["relative"]
@@ -743,8 +801,10 @@ class SocialAgent(BlubAgent):
                 return {"move": move, "speak": speak, "act": None}
 
         # Priority 4: follow food pheromone gradient — dampen by no-entry
+        # Skip food trail following while octopus pheromone suppression active
         noentry_penalty_mult = 2.0  # TODO: move to state if tuning needed
-        food_trails = state.get("nearby_food_trails", [])
+        current_tick_p4 = state.get("tick", 0)
+        food_trails = state.get("nearby_food_trails", []) if current_tick_p4 >= self._pheromone_suppress_until else []
         if food_trails:
             best_food = None
             best_effective = -999.0
@@ -856,6 +916,8 @@ class SocialAgent(BlubAgent):
         self.last_deaths = 0
         self.decay_counter = 0
         self.last_epoch = -1
+        self._eel_memory = []
+        self._pheromone_suppress_until = 0
         print(f"[{self.name}] Language state RESET (turnover rebirth)")
 
 

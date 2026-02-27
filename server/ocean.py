@@ -16,6 +16,7 @@ from .metrics import MetricsLogger
 from .cultural_cache import CulturalCache
 from .pheromone import PheromoneMap
 from .colony import ColonyManager
+from .tidal import TidalEngine
 
 
 @dataclass
@@ -82,6 +83,20 @@ class Ocean:
         self.cultural_cache = CulturalCache(config)
         self.pheromone_map = PheromoneMap(config)
         self.colony_mgr = ColonyManager(config)
+        self.tidal = TidalEngine(config.get("tidal", {}))
+        self.global_tick: int = 0  # never resets between epochs
+
+        # Tidal epoch accumulators (reset each epoch)
+        self._tidal_predators_spawned_day: int = 0
+        self._tidal_predators_spawned_night: int = 0
+        self._tidal_credits_earned: float = 0.0
+        self._tidal_deaths_day: int = 0
+        self._tidal_deaths_night: int = 0
+
+        # Predator mosaic accumulators (reset every 100 ticks with metrics)
+        self._predators_by_type: dict[str, int] = {}
+        self._deaths_by_predator_type: dict[str, int] = {}
+        self._pheromone_clear_events: int = 0
 
         # CSR tracking: {agent_id: (heard_tick, agent_x, agent_y, speaker_type, listener_type)}
         self._csr_pending: dict[str, tuple[int, int, int, str, str]] = {}
@@ -187,7 +202,11 @@ class Ocean:
 
     def process_tick(self):
         self.tick += 1
+        self.global_tick += 1
         self.current_sounds = []
+
+        # Advance tidal cycles
+        self.tidal.tick(self.global_tick)
 
         # Reset per-tick reward tracking
         for lob in self.lobsters.values():
@@ -201,6 +220,9 @@ class Ocean:
 
         # 3. Rift rewards (group bonus)
         self._process_rift_rewards()
+        # Tidal accumulator: credits earned this tick
+        for lob in self.lobsters.values():
+            self._tidal_credits_earned += lob.reward_this_tick
 
         # 3a. Pheromone deposits from rift rewards — path-based (ACO-style)
         food_scale = self.config.get("pheromones", {}).get("food_deposit_scale", 0.02)
@@ -253,13 +275,27 @@ class Ocean:
 
         # 4. Predator spawns & movement (with danger pheromone attraction)
         rift_positions = [(r.x, r.y) for r in self.rift_mgr.active_rifts]
-        self.predator_mgr.process_tick(
+        alive_count = sum(1 for l in self.lobsters.values() if l.alive)
+        spawned = self.predator_mgr.process_tick(
             self._get_lobster_positions(), self.size, rift_positions,
             pheromone_map=self.pheromone_map,
+            spawn_rate_multiplier=self.tidal.get_predator_spawn_multiplier(),
+            alive_count=alive_count,
         )
+        # Tidal accumulator: predator spawns by phase
+        if self.tidal.day_night_phase > 0.5:
+            self._tidal_predators_spawned_night += spawned
+        else:
+            self._tidal_predators_spawned_day += spawned
 
         # 5. Predator kills
         kill_positions = self._process_predator_kills()
+        # Tidal accumulator: deaths by phase
+        if kill_positions:
+            if self.tidal.day_night_phase > 0.5:
+                self._tidal_deaths_night += len(kill_positions)
+            else:
+                self._tidal_deaths_day += len(kill_positions)
 
         # 5b. Danger pheromone at kill sites
         danger_amt = self.config.get("pheromones", {}).get("danger_deposit", 3.0)
@@ -272,7 +308,7 @@ class Ocean:
                 self.pheromone_map.deposit(rift.x, rift.y, "noentry", ne_deposit * 2)
 
         # 6. Rift depletion & respawn
-        self.rift_mgr.tick_rifts(self.tick)
+        self.rift_mgr.tick_rifts(self.tick, tidal_offset=self.tidal.get_rift_offset())
 
         # 7. Death timers
         self._process_death_timers()
@@ -315,6 +351,8 @@ class Ocean:
                 sum(len(c.members) for c in self.colony_mgr.colonies.values()) / n_colonies
                 if n_colonies > 0 else 0
             )
+            # Snapshot predator counts by type
+            self._predators_by_type = self.predator_mgr.get_counts_by_type()
             self.latest_metrics = self.metrics_logger.compute(
                 self.tick, self.epoch_mgr.epoch, self.lobsters,
                 self._csr_heard_events, self._csr_successes,
@@ -328,7 +366,25 @@ class Ocean:
                 danger_trail_cells=len(self.pheromone_map.danger_trails),
                 noentry_trail_cells=len(self.pheromone_map.noentry_trails),
                 colony_scent_cells=len(self.pheromone_map.colony_scent),
+                tidal_pred_day=self._tidal_predators_spawned_day,
+                tidal_pred_night=self._tidal_predators_spawned_night,
+                tidal_credits=round(self._tidal_credits_earned, 2),
+                tidal_deaths_day=self._tidal_deaths_day,
+                tidal_deaths_night=self._tidal_deaths_night,
+                seasonal_mult=round(self.tidal.get_seasonal_multiplier(), 3),
+                predators_by_type=dict(self._predators_by_type),
+                deaths_by_predator_type=dict(self._deaths_by_predator_type),
+                pheromone_clear_events=self._pheromone_clear_events,
             )
+            # Reset tidal accumulators
+            self._tidal_predators_spawned_day = 0
+            self._tidal_predators_spawned_night = 0
+            self._tidal_credits_earned = 0.0
+            self._tidal_deaths_day = 0
+            self._tidal_deaths_night = 0
+            # Reset predator mosaic accumulators
+            self._deaths_by_predator_type = {}
+            self._pheromone_clear_events = 0
 
     def _process_movements(self):
         directions = {
@@ -404,12 +460,13 @@ class Ocean:
                                            agent_type=lob.agent_type, agent_age=lob.age)
 
     def _process_rift_rewards(self):
+        seasonal_mult = self.tidal.get_seasonal_multiplier()
         for rift in self.rift_mgr.active_rifts:
             nearby = self._lobsters_near(rift.x, rift.y, self.config["rifts"]["radius"])
             if not nearby:
                 continue
             n = len(nearby)
-            reward = self.rift_mgr.calc_group_reward(n)
+            reward = self.rift_mgr.calc_group_reward(n) * seasonal_mult
             # Per-type depletion: scale drain by rift type's depletion_rate / base 0.02
             depletion_rate = self.rift_mgr.depletion_rate_for_type(rift.rift_type)
             drain_multiplier = depletion_rate / 0.02
@@ -445,17 +502,29 @@ class Ocean:
         kill_radius = self.config["predators"]["kill_radius"]
         death_timeout = self.config["economy"]["death_timeout"]
         death_penalty = self.config["economy"]["death_credit_penalty"]
-        kill_prob_base = self.config["predators"].get("kill_prob_base", 0.8)
         confusion_enabled = self.config["predators"].get("confusion_enabled", True)
         failed_penalty = self.config["predators"].get("failed_attack_penalty", 5)
         kill_positions: list[tuple[int, int]] = []
 
+        # Octopus pheromone clear config
+        type_configs = self.config["predators"].get("types", {})
+        octopus_clear_radius = type_configs.get("octopus", {}).get("pheromone_clear_radius", 3)
+
         for pred in self.predator_mgr.active_predators:
-            # Find all targets in kill_radius
+            # Eel: skip if already attacked (waiting for cooldown respawn)
+            if pred.predator_type == "eel" and pred.has_attacked:
+                continue
+
+            # Per-type kill radius: eel uses attack_radius from config, others use global
+            effective_kill_radius = kill_radius
+            if pred.predator_type == "eel":
+                effective_kill_radius = type_configs.get("eel", {}).get("attack_radius", kill_radius)
+
+            # Find all targets in effective kill radius
             targets = [
                 lob for lob in self.lobsters.values()
                 if lob.alive and lob.grace_ticks <= 0
-                and math.sqrt((lob.x - pred.x) ** 2 + (lob.y - pred.y) ** 2) <= kill_radius
+                and math.sqrt((lob.x - pred.x) ** 2 + (lob.y - pred.y) ** 2) <= effective_kill_radius
             ]
             if not targets:
                 continue
@@ -470,10 +539,10 @@ class Ocean:
             ]
             group_size = max(1, len(group))
 
-            # Confusion effect: kill_prob = base / sqrt(group_size)
-            kill_prob = kill_prob_base
+            # Per-type lethality instead of global kill_prob_base
+            kill_prob = pred.lethality
             if confusion_enabled:
-                kill_prob = kill_prob_base / math.sqrt(group_size)
+                kill_prob = pred.lethality / math.sqrt(group_size)
 
             # Social bonus: 3+ social agents in group → extra 0.8x reduction
             social_count = sum(1 for lob in group if lob.agent_type == "social")
@@ -488,9 +557,27 @@ class Ocean:
                 target.deaths_this_epoch += 1
                 penalty = target.credits_earned * death_penalty
                 target.credits_earned = max(0, target.credits_earned - penalty)
+                # Track deaths by predator type
+                self._deaths_by_predator_type[pred.predator_type] = (
+                    self._deaths_by_predator_type.get(pred.predator_type, 0) + 1
+                )
             else:
                 # Failed attack: predator loses lifetime
                 pred.lifetime_remaining -= failed_penalty
+
+            # Eel: after any attack (hit or miss), enter cooldown
+            if pred.predator_type == "eel":
+                pred.has_attacked = True
+                pred.attack_cooldown = pred.respawn_delay
+
+            # Octopus: on contact with targets, clear food pheromone in radius
+            if pred.predator_type == "octopus":
+                r = octopus_clear_radius
+                px, py = int(pred.x), int(pred.y)
+                for key in list(self.pheromone_map.food_trails.keys()):
+                    if abs(key[0] - px) <= r and abs(key[1] - py) <= r:
+                        del self.pheromone_map.food_trails[key]
+                self._pheromone_clear_events += 1
 
         return kill_positions
 
@@ -671,7 +758,7 @@ class Ocean:
                 if lob.age <= 100:
                     continue
                 tier_info = self.get_tier_info(self.get_tier(lob))
-                sound_range = tier_info["sound_range"]
+                sound_range = int(tier_info["sound_range"] * self.tidal.get_sound_range_multiplier())
                 if abs(lob.x - sx) <= sound_range and abs(lob.y - sy) <= sound_range:
                     # CSR: don't overwrite if already pending
                     if lob.id not in self._csr_pending:
@@ -933,6 +1020,7 @@ class Ocean:
                     "id": pred.id,
                     "position": [pred.x, pred.y],
                     "relative": [dx, dy],
+                    "type": pred.predator_type,
                 })
 
         # Nearby pheromones (within vision radius)
@@ -949,6 +1037,8 @@ class Ocean:
         )
 
         # Sounds heard (within sound_range) — with channel noise
+        # Tidal: night reduces effective sound range
+        effective_sound_range = int(sound_range * self.tidal.get_sound_range_multiplier())
         noise_rate = self.config.get("communication", {}).get("channel_noise_rate", 0.0)
         sounds_heard = []
         for snd in self.current_sounds:
@@ -956,7 +1046,7 @@ class Ocean:
                 continue
             sx, sy = snd["pos"]
             dist = max(abs(sx - lob.x), abs(sy - lob.y))
-            if dist <= sound_range:
+            if dist <= effective_sound_range:
                 # Channel noise: each sound has noise_rate chance of corruption
                 if noise_rate > 0:
                     noisy = [
@@ -998,6 +1088,7 @@ class Ocean:
             "nearby_colony_scent": nearby_colony_scent,
             "my_colony": in_colony,
             "my_colony_id": my_colony_id,
+            "tidal": self.tidal.get_state_for_agent(),
         }
 
     # ----- Viewer state -----
@@ -1034,6 +1125,8 @@ class Ocean:
             predators.append({
                 "id": pred.id,
                 "pos": [pred.x, pred.y],
+                "type": pred.predator_type,
+                "cooldown": pred.attack_cooldown > 0,
             })
 
         total_earned = sum(l.credits_earned for l in self.lobsters.values())
@@ -1064,6 +1157,7 @@ class Ocean:
             "sound_lines": self._build_sound_lines(),
             "pheromones": self.pheromone_map.get_viewer_data(zone_min, zone_max),
             "colonies": self.colony_mgr.get_viewer_data(),
+            "tidal": self.tidal.get_viewer_data(),
             "emergent_dictionary": self._build_emergent_dictionary(),
             "epoch_history": self.epoch_history,
             "metrics": self.latest_metrics,
