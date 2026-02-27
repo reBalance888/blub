@@ -86,7 +86,7 @@ pheromones:
   danger_decay_rate: 0.97   # per-tick multiplier for danger trails (persists longer)
   diffusion_rate: 0.1       # spread to 4 neighbors per tick
   max_intensity: 10.0
-  food_deposit_scale: 0.02  # reward → deposit multiplier
+  food_deposit_scale: 0.10  # reward → deposit multiplier (5x for visible trails)
   danger_deposit: 3.0       # fixed deposit on death
   trail_reinforce: 0.05     # positive feedback when lobster follows food trail
 
@@ -113,7 +113,7 @@ cultural_cache:
 
 language:
   sigma_start: 1.0
-  sigma_min: 0.5
+  sigma_min: 0.7
   sigma_anneal_per_epoch: 0.02
   topo_bonus_scale: 4.0
   weight_decay: 0.9995

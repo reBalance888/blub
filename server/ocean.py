@@ -152,8 +152,11 @@ class Ocean:
         balance = self.config["economy"]["starting_balance"]
         agent_type = self._extract_agent_type(name)
         grace = self.config["predators"].get("grace_period", 60)
+        # Stagger retirement: random initial age so agents don't all retire simultaneously
+        agent_lifetime = self.config.get("agents", {}).get("agent_lifetime", 3000)
+        initial_age = random.randint(0, agent_lifetime - 1)
         # Temporarily add to recalculate zone, then spawn inside it
-        lob = Lobster(id=lid, name=name, x=0, y=0, balance=balance, agent_type=agent_type, grace_ticks=grace)
+        lob = Lobster(id=lid, name=name, x=0, y=0, balance=balance, agent_type=agent_type, grace_ticks=grace, age=initial_age)
         self.lobsters[lid] = lob
         self._recalculate_active_zone()
         x, y = self._random_pos_in_zone()

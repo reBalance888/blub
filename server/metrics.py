@@ -26,7 +26,10 @@ class MetricsLogger:
         """Called each tick for each sound event with server-side context."""
         obs = (tuple(sound_seq), context_key, reward)
         self.observations.append(obs)
-        self.long_observations.append(obs)
+        # Long buffer: only include experienced agents (age>100) to avoid
+        # MI dilution from naive reborn agents producing random sounds
+        if agent_age > 100:
+            self.long_observations.append(obs)
         if agent_type == "social" and agent_age > 100:
             self.social_observations.append(obs)
 
