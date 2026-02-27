@@ -11,972 +11,1258 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: #0a1628;
-    color: #c8d6e5;
+    color: #E0E0E0;
     font-family: 'Courier New', monospace;
     overflow: hidden;
     height: 100vh;
   }
   #root { height: 100vh; }
+  .panel {
+    background: rgba(0, 12, 24, 0.88);
+    border: 1px solid rgba(0, 200, 255, 0.15);
+    border-radius: 6px;
+    padding: 10px 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .panel-title {
+    font-size: 10px;
+    font-weight: bold;
+    color: #8899AA;
+    margin-bottom: 6px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-track { background: transparent; }
+  .sidebar::-webkit-scrollbar-thumb { background: rgba(0,200,255,0.2); border-radius: 2px; }
+  .sound-log::-webkit-scrollbar { width: 4px; }
+  .sound-log::-webkit-scrollbar-track { background: transparent; }
+  .sound-log::-webkit-scrollbar-thumb { background: rgba(0,200,255,0.2); border-radius: 2px; }
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
-// --- Agent type tags ---
-const TYPE_TAG = { social: '(S)', greedy: '(G)', random: '(R)' };
-const TYPE_COLOR = { social: '#7fdbca', greedy: '#ffd700', random: '#8395a7' };
-
-// --- Colors ---
+// ═══════════════════════════════════════════════════
+// BIOLUMINESCENT COLOR PALETTE
+// ═══════════════════════════════════════════════════
 const COLORS = {
   bg: '#0a1628',
-  ocean: '#0d1f3c',
-  grid: 'rgba(0, 212, 255, 0.04)',
-  rift: '#00d4ff',
-  riftGlow: 'rgba(0, 212, 255, 0.3)',
+  oceanTop: '#0a1628',
+  oceanBot: '#162d50',
+  panel: 'rgba(0, 12, 24, 0.88)',
+  panelBorder: 'rgba(0, 200, 255, 0.15)',
+  text: '#E0E0E0',
+  textDim: '#8899AA',
+  accent: '#6DD4E3',
+  gold: '#ffd700',
+  success: '#69F0AE',
+  warning: '#FF6B6B',
+  tier: {
+    shrimp:  '#00D4FF',
+    lobster: '#FFB000',
+    kraken:  '#E040FB',
+  },
+  tierGlow: {
+    shrimp:  '#00D4FF',
+    lobster: '#FFB000',
+    kraken:  '#E040FB',
+  },
+  food: '#00E676',
+  pheromoneTrail: '#B388FF',
+  signal: '#FFE082',
+  predator: '#FF4444',
+  predatorDark: '#990000',
   riftType: {
-    gold: '#ffd700',
+    gold:   '#ffd700',
     silver: '#c0c0c0',
     copper: '#cd7f32',
   },
-  predator: '#ff4757',
-  sound: '#7fdbca',
-  dead: 'rgba(120, 120, 120, 0.5)',
-  panel: '#111d2e',
-  panelBorder: '#1a2d45',
-  text: '#c8d6e5',
-  textDim: '#576574',
-  accent: '#00d4ff',
-  gold: '#ffd700',
-  tier: {
-    shrimp: '#8395a7',
-    lobster: '#ee5a24',
-    kraken: '#a55eea',
-  },
 };
 
-// --- Main App ---
+const TYPE_TAG = { social: '(S)', greedy: '(G)', random: '(R)' };
+const TYPE_COLOR = { social: '#7fdbca', greedy: '#ffd700', random: '#8395a7' };
+
+// ═══════════════════════════════════════════════════
+// SPRITE CACHE — Pre-rendered offscreen canvases
+// All creatures look like sea creatures, not dots!
+// Never use shadowBlur at runtime
+// ═══════════════════════════════════════════════════
+const _spriteCache = {};
+
+function getSprite(type, size, variant) {
+  const key = `${type}_${size}_${variant}`;
+  if (_spriteCache[key]) return _spriteCache[key];
+  const c = document.createElement('canvas');
+  const dead = variant === 'dead';
+
+  // All types use wider canvas for appendages
+  const cw = Math.round(size * 1.8);
+  const ch = Math.round(size * 1.6);
+  c.width = cw; c.height = ch;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  if (dead) ctx.globalAlpha = 0.35;
+
+  const cx = cw / 2, cy = ch / 2;
+  const col = dead ? '#667788' : COLORS.tier[type] || COLORS.tier.shrimp;
+  const colDark = dead ? '#445566' : (type === 'shrimp' ? '#0099CC' : type === 'lobster' ? '#CC8800' : '#AA00CC');
+  const lw = Math.max(1, size * 0.09);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  if (type === 'shrimp') {
+    // ═══ SHRIMP: curved body + tail fan + antennae + legs ═══
+    // Long antennae (behind body)
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(0.8, lw * 0.7);
+    ctx.beginPath();
+    ctx.moveTo(cx - size * 0.1, cy - size * 0.25);
+    ctx.quadraticCurveTo(cx - size * 0.4, cy - size * 0.65, cx - size * 0.55, cy - size * 0.55);
+    ctx.moveTo(cx + size * 0.1, cy - size * 0.25);
+    ctx.quadraticCurveTo(cx + size * 0.4, cy - size * 0.65, cx + size * 0.55, cy - size * 0.55);
+    ctx.stroke();
+
+    // Legs (3 pairs, small)
+    ctx.lineWidth = Math.max(0.6, lw * 0.5);
+    for (let i = 0; i < 3; i++) {
+      const ly = cy + size * (-0.05 + i * 0.14);
+      ctx.beginPath();
+      ctx.moveTo(cx - size * 0.18, ly);
+      ctx.lineTo(cx - size * 0.32, ly + size * 0.1);
+      ctx.moveTo(cx + size * 0.18, ly);
+      ctx.lineTo(cx + size * 0.32, ly + size * 0.1);
+      ctx.stroke();
+    }
+
+    // Body (curved segmented shrimp shape)
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - size * 0.05, size * 0.22, size * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Body segments (darker lines)
+    ctx.strokeStyle = colDark + '60';
+    ctx.lineWidth = Math.max(0.5, size * 0.04);
+    for (let i = -1; i <= 2; i++) {
+      const sy = cy + i * size * 0.1;
+      ctx.beginPath();
+      ctx.moveTo(cx - size * 0.18, sy);
+      ctx.lineTo(cx + size * 0.18, sy);
+      ctx.stroke();
+    }
+
+    // Tail fan
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + size * 0.25);
+    ctx.lineTo(cx - size * 0.2, cy + size * 0.45);
+    ctx.lineTo(cx, cy + size * 0.38);
+    ctx.lineTo(cx + size * 0.2, cy + size * 0.45);
+    ctx.closePath();
+    ctx.fill();
+
+    // Shell highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(cx - size * 0.05, cy - size * 0.15, size * 0.1, size * 0.15, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes (always visible — key for recognition)
+    if (!dead) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx - size * 0.12, cy - size * 0.3, Math.max(1.2, size * 0.07), 0, Math.PI * 2);
+      ctx.arc(cx + size * 0.12, cy - size * 0.3, Math.max(1.2, size * 0.07), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(cx - size * 0.1, cy - size * 0.3, Math.max(0.7, size * 0.04), 0, Math.PI * 2);
+      ctx.arc(cx + size * 0.1, cy - size * 0.3, Math.max(0.7, size * 0.04), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+  } else if (type === 'lobster') {
+    // ═══ LOBSTER: chunky body + BIG claws + stalked eyes + tail ═══
+    // Arms to claws
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(1.2, lw);
+    // Left arm
+    ctx.beginPath();
+    ctx.moveTo(cx - size * 0.22, cy - size * 0.1);
+    ctx.quadraticCurveTo(cx - size * 0.45, cy - size * 0.25, cx - size * 0.55, cy - size * 0.35);
+    ctx.stroke();
+    // Right arm
+    ctx.beginPath();
+    ctx.moveTo(cx + size * 0.22, cy - size * 0.1);
+    ctx.quadraticCurveTo(cx + size * 0.45, cy - size * 0.25, cx + size * 0.55, cy - size * 0.35);
+    ctx.stroke();
+
+    // Big claws (the lobster signature!)
+    ctx.fillStyle = col;
+    // Left claw — two overlapping ellipses for pincer look
+    ctx.beginPath();
+    ctx.ellipse(cx - size * 0.6, cy - size * 0.4, size * 0.16, size * 0.1, -0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx - size * 0.52, cy - size * 0.45, size * 0.12, size * 0.07, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    // Claw gap
+    ctx.strokeStyle = dead ? '#334' : '#00000044';
+    ctx.lineWidth = Math.max(0.5, size * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(cx - size * 0.5, cy - size * 0.38);
+    ctx.lineTo(cx - size * 0.68, cy - size * 0.42);
+    ctx.stroke();
+    // Right claw
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.ellipse(cx + size * 0.6, cy - size * 0.4, size * 0.16, size * 0.1, 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx + size * 0.52, cy - size * 0.45, size * 0.12, size * 0.07, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = dead ? '#334' : '#00000044';
+    ctx.lineWidth = Math.max(0.5, size * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(cx + size * 0.5, cy - size * 0.38);
+    ctx.lineTo(cx + size * 0.68, cy - size * 0.42);
+    ctx.stroke();
+
+    // Legs (4 pairs)
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(0.7, lw * 0.6);
+    for (let i = 0; i < 4; i++) {
+      const ly = cy + size * (-0.05 + i * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(cx - size * 0.25, ly);
+      ctx.lineTo(cx - size * 0.4, ly + size * 0.08);
+      ctx.moveTo(cx + size * 0.25, ly);
+      ctx.lineTo(cx + size * 0.4, ly + size * 0.08);
+      ctx.stroke();
+    }
+
+    // Body (wide carapace)
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + size * 0.05, size * 0.28, size * 0.38, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Shell highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(cx - size * 0.06, cy - size * 0.08, size * 0.12, size * 0.18, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+    // Shell center line
+    ctx.strokeStyle = colDark + '40';
+    ctx.lineWidth = Math.max(0.5, size * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - size * 0.28);
+    ctx.lineTo(cx, cy + size * 0.35);
+    ctx.stroke();
+
+    // Tail (segmented)
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + size * 0.4, size * 0.15, size * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + size * 0.45);
+    ctx.lineTo(cx - size * 0.14, cy + size * 0.55);
+    ctx.lineTo(cx, cy + size * 0.5);
+    ctx.lineTo(cx + size * 0.14, cy + size * 0.55);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye stalks + eyes
+    if (!dead) {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = Math.max(0.8, lw * 0.7);
+      ctx.beginPath();
+      ctx.moveTo(cx - size * 0.12, cy - size * 0.3);
+      ctx.lineTo(cx - size * 0.18, cy - size * 0.48);
+      ctx.moveTo(cx + size * 0.12, cy - size * 0.3);
+      ctx.lineTo(cx + size * 0.18, cy - size * 0.48);
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx - size * 0.18, cy - size * 0.5, Math.max(1.5, size * 0.08), 0, Math.PI * 2);
+      ctx.arc(cx + size * 0.18, cy - size * 0.5, Math.max(1.5, size * 0.08), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(cx - size * 0.17, cy - size * 0.5, Math.max(0.8, size * 0.04), 0, Math.PI * 2);
+      ctx.arc(cx + size * 0.17, cy - size * 0.5, Math.max(0.8, size * 0.04), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+  } else if (type === 'kraken') {
+    // ═══ KRAKEN: bulbous head + 8 wavy tentacles + big eyes ═══
+    // Tentacles (8, wavy, extending down and out)
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(1.2, lw * 0.9);
+    for (let i = 0; i < 8; i++) {
+      const baseAngle = (i / 8) * Math.PI * 1.2 + Math.PI * 0.4; // spread below
+      const startX = cx + Math.cos(baseAngle) * size * 0.25;
+      const startY = cy + Math.sin(baseAngle) * size * 0.15 + size * 0.1;
+      const endX = cx + Math.cos(baseAngle) * size * 0.7;
+      const endY = cy + Math.sin(baseAngle) * size * 0.55 + size * 0.15;
+      const ctrlX = (startX + endX) / 2 + Math.sin(i * 1.3) * size * 0.15;
+      const ctrlY = (startY + endY) / 2 + Math.cos(i * 0.9) * size * 0.1;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.quadraticCurveTo(ctrlX, ctrlY, endX, endY);
+      ctx.stroke();
+      // Tentacle tip (small dot)
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(endX, endY, Math.max(0.8, size * 0.03), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Mantle/head (large rounded dome)
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - size * 0.05, size * 0.3, size * 0.35, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Head highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.ellipse(cx - size * 0.08, cy - size * 0.18, size * 0.12, size * 0.15, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Big alien eyes (kraken signature!)
+    if (!dead) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.ellipse(cx - size * 0.14, cy - size * 0.08, Math.max(2, size * 0.1), Math.max(1.5, size * 0.07), 0, 0, Math.PI * 2);
+      ctx.ellipse(cx + size * 0.14, cy - size * 0.08, Math.max(2, size * 0.1), Math.max(1.5, size * 0.07), 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Slit pupils (vertical like octopus)
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.ellipse(cx - size * 0.13, cy - size * 0.08, Math.max(0.7, size * 0.03), Math.max(1.2, size * 0.06), 0, 0, Math.PI * 2);
+      ctx.ellipse(cx + size * 0.13, cy - size * 0.08, Math.max(0.7, size * 0.03), Math.max(1.2, size * 0.06), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  _spriteCache[key] = c;
+  return c;
+}
+
+// Pre-rendered glow halos (no shadowBlur at runtime)
+const _glowCache = {};
+function getGlow(color, size) {
+  const key = `glow_${color}_${size}`;
+  if (_glowCache[key]) return _glowCache[key];
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, color + '50');
+  grad.addColorStop(0.4, color + '20');
+  grad.addColorStop(1, color + '00');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  _glowCache[key] = c;
+  return c;
+}
+
+// ═══════════════════════════════════════════════════
+// PARTICLE SYSTEM — Object-pooled for death/spawn
+// ═══════════════════════════════════════════════════
+const MAX_PARTICLES = 200;
+const particlePool = [];
+for (let i = 0; i < MAX_PARTICLES; i++) {
+  particlePool.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 0, color: '', size: 0 });
+}
+
+function spawnParticles(wx, wy, color, count, type) {
+  let spawned = 0;
+  for (const p of particlePool) {
+    if (p.active || spawned >= count) continue;
+    p.active = true;
+    p.x = wx;
+    p.y = wy;
+    if (type === 'death') {
+      p.vx = (Math.random() - 0.5) * 0.15;
+      p.vy = -Math.random() * 0.08 - 0.02; // float upward
+      p.maxLife = 60 + Math.random() * 30;
+    } else { // spawn
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 1 + Math.random() * 2;
+      p.x = wx + Math.cos(angle) * dist;
+      p.y = wy + Math.sin(angle) * dist;
+      p.vx = (wx - p.x) * 0.03;
+      p.vy = (wy - p.y) * 0.03;
+      p.maxLife = 30 + Math.random() * 15;
+    }
+    p.life = 0;
+    p.color = color;
+    p.size = 1.5 + Math.random();
+    spawned++;
+  }
+}
+
+function updateParticles() {
+  for (const p of particlePool) {
+    if (!p.active) continue;
+    p.life++;
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.life >= p.maxLife) p.active = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// AMBIENT PARTICLES — Floating plankton
+// ═══════════════════════════════════════════════════
+const AMBIENT_COUNT = 120;
+const ambientParticles = [];
+for (let i = 0; i < AMBIENT_COUNT; i++) {
+  ambientParticles.push({
+    x: Math.random(),  // 0-1 fraction of canvas
+    y: Math.random(),
+    speed: 0.0001 + Math.random() * 0.0002,
+    phase: Math.random() * Math.PI * 2,
+    alpha: 0.06 + Math.random() * 0.08,
+    size: 1 + Math.random(),
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════
 function App() {
   const [state, setState] = useState(null);
   const [connected, setConnected] = useState(false);
   const [soundLog, setSoundLog] = useState([]);
   const [selected, setSelected] = useState(null);
-  const [floatingTexts, setFloatingTexts] = useState([]);
-  const wsRef = useRef(null);
-  const canvasRef = useRef(null);
-  const canvasContainerRef = useRef(null);
-  const floatIdRef = useRef(0);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
 
-  // WebSocket connection
+  const stateRef = useRef(null);
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const floatIdRef = useRef(0);
+  const floatingTextsRef = useRef([]);
+  const commArcsRef = useRef([]);
+  const metricsHistoryRef = useRef({ mutual_info: [], top_sim: [], pos_dis: [], csr: [], vocabulary_size: [], lastTick: 0 });
+  const prevAliveSetsRef = useRef(new Set());
+
+  // Camera state
+  const cameraRef = useRef({ cx: 25, cy: 25, zoom: 15, autoFollow: true });
+  const dragRef = useRef({ dragging: false, wasDrag: false, startX: 0, startY: 0, startCX: 0, startCY: 0 });
+  const selectedRef = useRef(null);
+
+  // Sync selected to ref for render loop
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+
+  // ─── WebSocket ───
   useEffect(() => {
     const connect = () => {
       const ws = new WebSocket(`ws://${location.hostname}:8000/ws/viewer`);
-      wsRef.current = ws;
 
       ws.onopen = () => {
         setConnected(true);
-        // Send a ping to keep alive
         ws.send('ping');
       };
 
       ws.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data);
+          stateRef.current = data;
           setState(data);
 
-          // Add sounds to log
+          // Track deaths for particles
+          if (data.lobsters) {
+            const aliveNow = new Set(data.lobsters.filter(l => l.alive).map(l => l.id));
+            const prev = prevAliveSetsRef.current;
+            for (const lob of data.lobsters) {
+              if (!lob.alive && prev.has(lob.id)) {
+                // Just died — spawn death particles
+                const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
+                spawnParticles(lob.pos[0], lob.pos[1], tierColor, 15, 'death');
+              }
+              if (lob.alive && lob.grace && !prev.has(lob.id)) {
+                // Just spawned — spawn birth particles
+                const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
+                spawnParticles(lob.pos[0], lob.pos[1], tierColor, 12, 'spawn');
+              }
+            }
+            prevAliveSetsRef.current = aliveNow;
+          }
+
+          // Sound log + floating texts
           if (data.sounds && data.sounds.length > 0) {
             setSoundLog(prev => {
               const newEntries = data.sounds.map(s => ({
-                tick: data.tick,
-                from: s.from,
-                sounds: s.sounds,
+                tick: data.tick, from: s.from, sounds: s.sounds,
                 key: `${data.tick}-${s.from}`,
               }));
               return [...newEntries, ...prev].slice(0, 50);
             });
 
-            // Create floating texts for sounds
-            setFloatingTexts(prev => {
-              const newFloats = data.sounds.map(s => {
-                const lob = data.lobsters.find(l => l.id === s.from);
-                if (!lob) return null;
-                floatIdRef.current++;
-                return {
-                  id: floatIdRef.current,
-                  x: lob.pos[0],
-                  y: lob.pos[1],
-                  text: s.sounds.join(' '),
-                  born: Date.now(),
-                };
-              }).filter(Boolean);
-              // Remove old (> 2s)
-              const now = Date.now();
-              const alive = prev.filter(f => now - f.born < 2000);
-              return [...alive, ...newFloats];
-            });
+            const now = Date.now();
+            for (const s of data.sounds) {
+              const lob = data.lobsters.find(l => l.id === s.from);
+              if (!lob) continue;
+              floatIdRef.current++;
+              floatingTextsRef.current.push({
+                id: floatIdRef.current,
+                x: lob.pos[0], y: lob.pos[1],
+                text: s.sounds.join(' '),
+                born: now,
+              });
+            }
+            // Trim old
+            floatingTextsRef.current = floatingTextsRef.current.filter(f => now - f.born < 2500);
+
+            // Communication arcs
+            if (data.sound_lines) {
+              for (const line of data.sound_lines) {
+                commArcsRef.current.push({ from: line.from, to: line.to, born: now });
+              }
+            }
+            commArcsRef.current = commArcsRef.current.filter(a => now - a.born < 800);
+          }
+
+          // Metrics history (only push on new epoch, not every tick)
+          if (data.metrics && data.metrics.tick && data.metrics.tick !== metricsHistoryRef.current.lastTick) {
+            const m = data.metrics;
+            const h = metricsHistoryRef.current;
+            h.lastTick = m.tick;
+            const push = (arr, val) => { arr.push(val ?? 0); if (arr.length > 30) arr.shift(); };
+            push(h.mutual_info, m.mutual_info);
+            push(h.top_sim, m.top_sim);
+            push(h.pos_dis, m.pos_dis);
+            push(h.csr, m.csr);
+            push(h.vocabulary_size, m.vocabulary_size);
           }
         } catch {}
       };
 
-      ws.onclose = () => {
-        setConnected(false);
-        setTimeout(connect, 2000);
-      };
-
+      ws.onclose = () => { setConnected(false); setTimeout(connect, 2000); };
       ws.onerror = () => ws.close();
     };
 
     connect();
-    return () => wsRef.current?.close();
   }, []);
 
-  // Procedural lobster drawing function
-  const drawLobster = useCallback((ctx, x, y, s, color, alive, clawAngle = 0) => {
-    // s = half-size (~3.5px). Lobster = round carapace + BIG claws + eye stalks + small legs
-    const lw = Math.max(1, s * 0.25);
-
-    // --- Arms (behind body, from shoulders to claws) ---
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lw;
-    ctx.lineCap = 'round';
-
-    // Left arm + claw
-    ctx.save();
-    ctx.translate(x - s * 0.5, y - s * 0.15);
-    ctx.rotate(-0.6 + clawAngle);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(-s * 0.5, -s * 0.35);
-    ctx.stroke();
-    // Claw pincer (filled oval)
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.ellipse(-s * 0.55, -s * 0.5, s * 0.28, s * 0.18, -0.4, 0, Math.PI * 2);
-    ctx.fill();
-    // Claw gap (dark slit)
-    ctx.strokeStyle = alive ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)';
-    ctx.lineWidth = Math.max(0.5, s * 0.08);
-    ctx.beginPath();
-    ctx.moveTo(-s * 0.38, -s * 0.48);
-    ctx.lineTo(-s * 0.7, -s * 0.52);
-    ctx.stroke();
-    ctx.restore();
-
-    // Right arm + claw
-    ctx.save();
-    ctx.translate(x + s * 0.5, y - s * 0.15);
-    ctx.rotate(0.6 - clawAngle);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lw;
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(s * 0.5, -s * 0.35);
-    ctx.stroke();
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.ellipse(s * 0.55, -s * 0.5, s * 0.28, s * 0.18, 0.4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = alive ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)';
-    ctx.lineWidth = Math.max(0.5, s * 0.08);
-    ctx.beginPath();
-    ctx.moveTo(s * 0.38, -s * 0.48);
-    ctx.lineTo(s * 0.7, -s * 0.52);
-    ctx.stroke();
-    ctx.restore();
-
-    // --- Small legs (2 pairs, short and stubby) ---
-    ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(0.5, s * 0.12);
-    ctx.lineCap = 'round';
-    for (let i = 0; i < 2; i++) {
-      const legY = y + s * (0.15 + i * 0.3);
-      ctx.beginPath();
-      ctx.moveTo(x - s * 0.45, legY);
-      ctx.lineTo(x - s * 0.7, legY + s * 0.15);
-      ctx.moveTo(x + s * 0.45, legY);
-      ctx.lineTo(x + s * 0.7, legY + s * 0.15);
-      ctx.stroke();
-    }
-
-    // --- Body / Carapace (wide round shell) ---
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.ellipse(x, y + s * 0.1, s * 0.52, s * 0.6, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Shell highlight (lighter arc on top)
-    ctx.fillStyle = alive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
-    ctx.beginPath();
-    ctx.ellipse(x - s * 0.08, y - s * 0.1, s * 0.25, s * 0.3, -0.2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Shell pattern (subtle darker middle line)
-    ctx.strokeStyle = alive ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.05)';
-    ctx.lineWidth = Math.max(0.5, s * 0.08);
-    ctx.beginPath();
-    ctx.moveTo(x, y - s * 0.35);
-    ctx.lineTo(x, y + s * 0.55);
-    ctx.stroke();
-
-    // --- Tail (small, curled under — not a fan!) ---
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.ellipse(x, y + s * 0.7, s * 0.2, s * 0.15, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // --- Eye stalks (short sticks with dots on top) ---
-    if (alive) {
-      // Stalks
-      ctx.strokeStyle = color;
-      ctx.lineWidth = Math.max(0.8, s * 0.15);
-      ctx.beginPath();
-      ctx.moveTo(x - s * 0.2, y - s * 0.35);
-      ctx.lineTo(x - s * 0.3, y - s * 0.65);
-      ctx.moveTo(x + s * 0.2, y - s * 0.35);
-      ctx.lineTo(x + s * 0.3, y - s * 0.65);
-      ctx.stroke();
-      // Eyes (bright dots)
-      ctx.fillStyle = '#fff';
-      ctx.beginPath();
-      ctx.arc(x - s * 0.3, y - s * 0.68, s * 0.13, 0, Math.PI * 2);
-      ctx.arc(x + s * 0.3, y - s * 0.68, s * 0.13, 0, Math.PI * 2);
-      ctx.fill();
-      // Pupils
-      ctx.fillStyle = '#111';
-      ctx.beginPath();
-      ctx.arc(x - s * 0.28, y - s * 0.68, s * 0.06, 0, Math.PI * 2);
-      ctx.arc(x + s * 0.28, y - s * 0.68, s * 0.06, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }, []);
-
-  // Canvas rendering — camera zoomed to active zone
-  useEffect(() => {
-    if (!state || !canvasRef.current || !canvasContainerRef.current) return;
+  // ─── Camera: wheel zoom ───
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
     const canvas = canvasRef.current;
-    const container = canvasContainerRef.current;
-    const dpr = window.devicePixelRatio || 1;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const cam = cameraRef.current;
+    const cssSize = rect.width;
 
-    // Fit canvas to container, respecting aspect ratio 1:1
-    const rect = container.getBoundingClientRect();
-    const cssSize = Math.min(rect.width, rect.height);
-    canvas.style.width = cssSize + 'px';
-    canvas.style.height = cssSize + 'px';
-    canvas.width = Math.round(cssSize * dpr);
-    canvas.height = Math.round(cssSize * dpr);
+    // Mouse in world coords before zoom
+    const worldX = cam.cx + (mx - cssSize / 2) / cam.zoom;
+    const worldY = cam.cy + (my - cssSize / 2) / cam.zoom;
 
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-    // All drawing uses CSS pixel space (cssSize × cssSize)
-    const W = cssSize;
-    const H = cssSize;
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    const newZoom = Math.max(3, Math.min(80, cam.zoom * factor));
 
-    // Camera: zoom to active zone with 2-cell padding
-    const az = state.active_zone || { min: 30, max: 69, size: 40 };
-    const pad = 2;
-    const camMin = Math.max(0, az.min - pad);
-    const camSize = az.size + pad * 2;
-    const CELL = W / camSize;
+    // Keep world point under cursor
+    const newCX = worldX - (mx - cssSize / 2) / newZoom;
+    const newCY = worldY - (my - cssSize / 2) / newZoom;
 
-    // Convert world coords to screen coords
-    const sx = (wx) => (wx - camMin) * CELL;
-    const sy = (wy) => (wy - camMin) * CELL;
-    const sc = (wx, wy) => [sx(wx) + CELL / 2, sy(wy) + CELL / 2];
+    cameraRef.current = { cx: newCX, cy: newCY, zoom: newZoom, autoFollow: false };
+  }, []);
 
-    // === LAYER 0: Ocean background ===
-    ctx.fillStyle = COLORS.ocean;
-    ctx.fillRect(0, 0, W, H);
+  // ─── Camera: drag pan ───
+  const handleMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    dragRef.current = {
+      dragging: true, wasDrag: false,
+      startX: e.clientX, startY: e.clientY,
+      startCX: cameraRef.current.cx, startCY: cameraRef.current.cy,
+    };
+  }, []);
 
-    // Subtle grid (every 5 cells)
-    ctx.strokeStyle = 'rgba(0, 212, 255, 0.035)';
-    ctx.lineWidth = 0.5;
-    for (let i = camMin; i <= camMin + camSize; i += 5) {
-      ctx.beginPath();
-      ctx.moveTo(sx(i), 0); ctx.lineTo(sx(i), H);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(0, sy(i)); ctx.lineTo(W, sy(i));
-      ctx.stroke();
-    }
+  const handleMouseMove = useCallback((e) => {
+    const d = dragRef.current;
+    if (!d.dragging) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.wasDrag = true;
+    const cam = cameraRef.current;
+    cameraRef.current = {
+      ...cam,
+      cx: d.startCX - dx / cam.zoom,
+      cy: d.startCY - dy / cam.zoom,
+      autoFollow: false,
+    };
+  }, []);
 
-    // Active zone border (thin glow)
-    ctx.strokeStyle = 'rgba(0, 212, 255, 0.15)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([8, 4]);
-    ctx.strokeRect(sx(az.min), sy(az.min), az.size * CELL, az.size * CELL);
-    ctx.setLineDash([]);
+  const handleMouseUp = useCallback(() => {
+    dragRef.current.dragging = false;
+  }, []);
 
-    // === LAYER 1: Pheromone trails (soft atmospheric glow) ===
-    if (state.pheromones) {
-      for (const p of state.pheromones) {
-        const [px, py] = [sx(p.pos[0]), sy(p.pos[1])];
-        const intensity = p.intensity;
-        if (p.type === "food") {
-          // Soft green radial glow
-          const r = CELL * (0.6 + intensity * 0.4);
-          const grad = ctx.createRadialGradient(px + CELL/2, py + CELL/2, 0, px + CELL/2, py + CELL/2, r);
-          grad.addColorStop(0, `rgba(0, 255, 180, ${intensity * 0.35})`);
-          grad.addColorStop(1, 'rgba(0, 255, 180, 0)');
-          ctx.fillStyle = grad;
-          ctx.fillRect(px + CELL/2 - r, py + CELL/2 - r, r * 2, r * 2);
-        } else {
-          // Soft red radial glow
-          const r = CELL * (0.5 + intensity * 0.3);
-          const grad = ctx.createRadialGradient(px + CELL/2, py + CELL/2, 0, px + CELL/2, py + CELL/2, r);
-          grad.addColorStop(0, `rgba(255, 40, 40, ${intensity * 0.25})`);
-          grad.addColorStop(1, 'rgba(255, 40, 40, 0)');
-          ctx.fillStyle = grad;
-          ctx.fillRect(px + CELL/2 - r, py + CELL/2 - r, r * 2, r * 2);
-        }
+  // ─── Camera: double-click reset ───
+  const handleDoubleClick = useCallback(() => {
+    cameraRef.current.autoFollow = true;
+  }, []);
+
+  // ─── Wheel zoom (native listener for preventDefault) ───
+  // Attached in render loop since canvas may not exist at mount time
+  const wheelAttachedRef = useRef(false);
+  useEffect(() => {
+    const check = setInterval(() => {
+      const canvas = canvasRef.current;
+      if (canvas && !wheelAttachedRef.current) {
+        canvas.addEventListener('wheel', handleWheel, { passive: false });
+        wheelAttachedRef.current = true;
+        clearInterval(check);
       }
+    }, 100);
+    return () => {
+      clearInterval(check);
+      const canvas = canvasRef.current;
+      if (canvas) canvas.removeEventListener('wheel', handleWheel);
+    };
+  }, [handleWheel]);
+
+  // ─── Keyboard shortcuts ───
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === 'f' || e.key === 'F') cameraRef.current.autoFollow = true;
+      if (e.key === 'Escape') setSelected(null);
+      if (e.key === 'Tab') { e.preventDefault(); setSidebarVisible(v => !v); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  // ─── Canvas click ───
+  const handleCanvasClick = useCallback((e) => {
+    if (dragRef.current.wasDrag) { dragRef.current.wasDrag = false; return; }
+    const st = stateRef.current;
+    if (!st) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const cssSize = rect.width;
+    const cam = cameraRef.current;
+
+    // Screen to world
+    const worldX = cam.cx + (mx - cssSize / 2) / cam.zoom;
+    const worldY = cam.cy + (my - cssSize / 2) / cam.zoom;
+
+    let found = null, minDist = Infinity;
+    for (const lob of st.lobsters) {
+      const dx = lob.pos[0] - worldX;
+      const dy = lob.pos[1] - worldY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 2 && d < minDist) { minDist = d; found = lob; }
     }
+    setSelected(found);
+  }, []);
 
-    // === LAYER 2: Colony territories (subtle fill + dashed border) ===
-    if (state.colonies) {
-      for (const c of state.colonies) {
-        const [cx, cy] = sc(c.center[0], c.center[1]);
-        const r = c.size * CELL * 0.9;
-        // Soft fill
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-        grad.addColorStop(0, 'rgba(255, 200, 50, 0.08)');
-        grad.addColorStop(1, 'rgba(255, 200, 50, 0)');
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.fill();
-        // Border
-        ctx.strokeStyle = 'rgba(255, 200, 50, 0.35)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([6, 4]);
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        // Label
-        ctx.fillStyle = 'rgba(255, 200, 50, 0.6)';
-        ctx.font = `${Math.max(9, CELL * 0.6)}px Courier New`;
-        ctx.textAlign = 'center';
-        ctx.fillText(`Colony (${c.size})`, cx, cy - r - 4);
-      }
-    }
-
-    // === LAYER 3: Communication lines ===
-    if (state.sound_lines && state.sound_lines.length > 0) {
-      ctx.globalAlpha = 0.2;
-      ctx.strokeStyle = COLORS.sound;
-      ctx.lineWidth = 1;
-      for (const line of state.sound_lines) {
-        const [x1, y1] = sc(line.from[0], line.from[1]);
-        const [x2, y2] = sc(line.to[0], line.to[1]);
-        ctx.beginPath();
-        ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    // === LAYER 4: Rifts (pulsing glow, colored by type) ===
-    const pulse = 0.8 + 0.2 * Math.sin(Date.now() / 500);
-    for (const rift of state.rifts) {
-      const [rx, ry] = sc(rift.pos[0], rift.pos[1]);
-      const baseR = 3 * CELL;
-      const r = baseR * rift.richness_pct * pulse;
-      const riftColor = COLORS.riftType[rift.rift_type] || COLORS.rift;
-
-      // Outer glow
-      const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, r);
-      grad.addColorStop(0, riftColor + '55');
-      grad.addColorStop(0.5, riftColor + '22');
-      grad.addColorStop(1, riftColor + '00');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(rx, ry, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Core dot
-      ctx.fillStyle = riftColor;
-      ctx.beginPath();
-      ctx.arc(rx, ry, CELL * 0.35, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Type label
-      ctx.fillStyle = riftColor + 'aa';
-      ctx.font = `${Math.max(7, CELL * 0.45)}px Courier New`;
-      ctx.textAlign = 'center';
-      ctx.fillText(rift.rift_type[0].toUpperCase(), rx, ry + CELL * 0.15);
-    }
-
-    // === LAYER 5: Lobsters ===
-    const t = Date.now();
-    for (const lob of state.lobsters) {
-      const [lx, ly] = sc(lob.pos[0], lob.pos[1]);
-      const s = CELL * 0.55;
-      const isSpeaking = lob.speaking && lob.speaking.length > 0;
-
-      if (!lob.alive) {
-        ctx.save();
-        ctx.translate(lx, ly);
-        ctx.rotate(Math.PI);
-        ctx.globalAlpha = 0.25;
-        drawLobster(ctx, 0, 0, s * 0.6, COLORS.dead, false);
-        ctx.globalAlpha = 1;
-        ctx.restore();
-        continue;
-      }
-
-      const tierColor = COLORS.tier[lob.tier] || COLORS.tier.shrimp;
-
-      // Glow halo
-      ctx.shadowColor = tierColor;
-      ctx.shadowBlur = CELL * 0.5;
-      ctx.fillStyle = tierColor;
-      ctx.beginPath();
-      ctx.arc(lx, ly, s * 0.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // Draw lobster
-      const clawAngle = isSpeaking ? Math.sin(t / 80) * 0.4 : 0;
-      ctx.save();
-      ctx.translate(lx, ly);
-      drawLobster(ctx, 0, 0, s, tierColor, true, clawAngle);
-      ctx.restore();
-
-      // Colony star
-      if (lob.colony) {
-        ctx.fillStyle = 'rgba(255, 200, 50, 0.9)';
-        ctx.font = `${Math.max(7, CELL * 0.45)}px monospace`;
-        ctx.textAlign = 'center';
-        ctx.fillText('\u2605', lx, ly - s - 3);
-      }
-
-      // Grace shield
-      if (lob.grace) {
-        const gPulse = 0.4 + 0.6 * Math.abs(Math.sin(t / 300));
-        ctx.strokeStyle = `rgba(0, 212, 255, ${gPulse})`;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.arc(lx, ly, s + 4, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-
-      // Speaking wave
-      if (isSpeaking) {
-        const wave = (t % 1000) / 1000;
-        ctx.strokeStyle = `rgba(127, 219, 202, ${0.5 - wave * 0.5})`;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(lx, ly, s + 3 + wave * CELL * 2, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      // Selected
-      if (selected && selected.id === lob.id) {
-        ctx.strokeStyle = COLORS.gold;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(lx, ly, s + 6, 0, Math.PI * 2);
-        ctx.stroke();
-        // Vision radius
-        const vision = lob.tier === 'kraken' ? 25 : lob.tier === 'lobster' ? 12 : 5;
-        ctx.strokeStyle = `${tierColor}33`;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.arc(lx, ly, vision * CELL, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
-
-    // === LAYER 6: Predators (on top, threatening) ===
-    for (const pred of state.predators) {
-      const [px, py] = sc(pred.pos[0], pred.pos[1]);
-      const s = CELL * 0.6;
-
-      // Red glow
-      ctx.shadowColor = COLORS.predator;
-      ctx.shadowBlur = CELL;
-      ctx.fillStyle = COLORS.predator;
-      ctx.beginPath();
-      ctx.moveTo(px, py - s);
-      ctx.lineTo(px - s * 0.7, py + s * 0.5);
-      ctx.lineTo(px + s * 0.7, py + s * 0.5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // Eye
-      ctx.fillStyle = '#fff';
-      ctx.beginPath();
-      ctx.arc(px, py - s * 0.2, s * 0.15, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // === LAYER 7: Floating sound texts ===
-    const now = Date.now();
-    for (const ft of floatingTexts) {
-      const age = now - ft.born;
-      if (age > 2000) continue;
-      const alpha = 1 - age / 2000;
-      const [fx, fy] = sc(ft.x, ft.y);
-
-      ctx.fillStyle = `rgba(127, 219, 202, ${alpha})`;
-      ctx.font = `${Math.max(9, CELL * 0.55)}px Courier New`;
-      ctx.textAlign = 'center';
-      ctx.fillText(ft.text, fx, fy - CELL * 0.8 - (age / 120));
-    }
-  }, [state, selected, floatingTexts, drawLobster]);
-
-  // Animation loop for floating texts
+  // ─── MAIN RENDER LOOP (60fps, decoupled from React) ───
   useEffect(() => {
     let raf;
     const animate = () => {
-      if (state && canvasRef.current) {
-        // Re-trigger render by updating floatingTexts age check
-        setFloatingTexts(prev => {
-          const now = Date.now();
-          return prev.filter(f => now - f.born < 2000);
-        });
+      const st = stateRef.current;
+      const canvas = canvasRef.current;
+      const container = containerRef.current;
+      if (!st || !canvas || !container) { raf = requestAnimationFrame(animate); return; }
+
+      const dpr = window.devicePixelRatio || 1;
+      const rect = container.getBoundingClientRect();
+      const cssSize = Math.min(rect.width, rect.height);
+      canvas.style.width = cssSize + 'px';
+      canvas.style.height = cssSize + 'px';
+      const pxSize = Math.round(cssSize * Math.min(dpr, 2)); // cap at 2x DPR
+      if (canvas.width !== pxSize || canvas.height !== pxSize) {
+        canvas.width = pxSize;
+        canvas.height = pxSize;
       }
+
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(Math.min(dpr, 2), Math.min(dpr, 2));
+      const W = cssSize;
+
+      // Camera
+      const cam = cameraRef.current;
+      const az = st.active_zone || { min: 10, max: 49, size: 40 };
+      if (cam.autoFollow) {
+        cam.cx = az.min + az.size / 2;
+        cam.cy = az.min + az.size / 2;
+        cam.zoom = W / (az.size + 4);
+      }
+
+      // World-to-screen helpers
+      const w2sx = (wx) => (wx - cam.cx) * cam.zoom + W / 2;
+      const w2sy = (wy) => (wy - cam.cy) * cam.zoom + W / 2;
+      const CELL = cam.zoom; // pixels per world unit
+      const t = Date.now();
+
+      // Update particles
+      updateParticles();
+
+      // ═══ LAYER 0: OCEAN BACKGROUND (gradient) ═══
+      const bgGrad = ctx.createLinearGradient(0, 0, 0, W);
+      bgGrad.addColorStop(0, COLORS.oceanTop);
+      bgGrad.addColorStop(0.5, '#0d1f3c');
+      bgGrad.addColorStop(1, COLORS.oceanBot);
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, W, W);
+
+      // Ambient particles (floating plankton)
+      ctx.fillStyle = 'rgba(200, 255, 240, 0.12)';
+      for (const ap of ambientParticles) {
+        ap.x += ap.speed;
+        if (ap.x > 1.02) ap.x = -0.02;
+        const px = ap.x * W + Math.sin(t * 0.001 + ap.phase) * 2;
+        const py = ap.y * W + Math.cos(t * 0.0008 + ap.phase) * 1.5;
+        ctx.globalAlpha = ap.alpha;
+        ctx.fillRect(Math.round(px), Math.round(py), ap.size, ap.size);
+      }
+      ctx.globalAlpha = 1;
+
+      // Subtle grid (every 5 cells)
+      ctx.strokeStyle = 'rgba(0, 212, 255, 0.03)';
+      ctx.lineWidth = 0.5;
+      const gridStart = Math.floor(cam.cx - W / 2 / CELL / 5) * 5;
+      const gridEnd = Math.ceil(cam.cx + W / 2 / CELL / 5) * 5;
+      for (let i = gridStart; i <= gridEnd; i += 5) {
+        const sx = Math.round(w2sx(i));
+        const sy = Math.round(w2sy(i));
+        if (sx >= 0 && sx <= W) { ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, W); ctx.stroke(); }
+        if (sy >= 0 && sy <= W) { ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke(); }
+      }
+
+      // Active zone border
+      ctx.strokeStyle = 'rgba(0, 212, 255, 0.12)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([8, 4]);
+      const zx = Math.round(w2sx(az.min));
+      const zy = Math.round(w2sy(az.min));
+      const zs = Math.round(az.size * CELL);
+      ctx.strokeRect(zx, zy, zs, zs);
+      ctx.setLineDash([]);
+
+      // ═══ LAYER 1: PHEROMONE TRAILS ═══
+      if (st.pheromones) {
+        ctx.globalCompositeOperation = 'lighter';
+        for (const p of st.pheromones) {
+          const px = Math.round(w2sx(p.pos[0]) + CELL / 2);
+          const py = Math.round(w2sy(p.pos[1]) + CELL / 2);
+          const intensity = p.intensity;
+          const r = Math.max(2, CELL * (0.4 + intensity * 0.4));
+          if (p.type === 'food') {
+            ctx.fillStyle = `rgba(0, 230, 118, ${Math.min(0.4, intensity * 0.3)})`;
+          } else {
+            ctx.fillStyle = `rgba(255, 68, 68, ${Math.min(0.35, intensity * 0.25)})`;
+          }
+          ctx.beginPath();
+          ctx.arc(px, py, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      // ═══ LAYER 2: COLONY TERRITORIES ═══
+      if (st.colonies) {
+        for (const c of st.colonies) {
+          const cx = Math.round(w2sx(c.center[0]));
+          const cy = Math.round(w2sy(c.center[1]));
+          const r = Math.max(10, c.size * CELL * 0.9);
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+          grad.addColorStop(0, 'rgba(255, 200, 50, 0.08)');
+          grad.addColorStop(1, 'rgba(255, 200, 50, 0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = 'rgba(255, 200, 50, 0.3)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
+          // Colony label
+          ctx.fillStyle = 'rgba(255, 200, 50, 0.6)';
+          ctx.font = `${Math.max(9, CELL * 0.5)}px monospace`;
+          ctx.textAlign = 'center';
+          ctx.fillText(`Colony (${c.size})`, cx, cy - r - 4);
+        }
+      }
+
+      // ═══ LAYER 3: COMMUNICATION ARCS (bezier curves) ═══
+      const now = Date.now();
+      const arcs = commArcsRef.current;
+      if (arcs.length > 0) {
+        for (const arc of arcs) {
+          const age = now - arc.born;
+          const alpha = Math.max(0, 0.5 - age / 800 * 0.5);
+          const [x1, y1] = [w2sx(arc.from[0]), w2sy(arc.from[1])];
+          const [x2, y2] = [w2sx(arc.to[0]), w2sy(arc.to[1])];
+          const midX = (x1 + x2) / 2;
+          const midY = (y1 + y2) / 2 - Math.abs(x2 - x1) * 0.2;
+          ctx.strokeStyle = `rgba(255, 224, 130, ${alpha})`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x1), Math.round(y1));
+          ctx.quadraticCurveTo(Math.round(midX), Math.round(midY), Math.round(x2), Math.round(y2));
+          ctx.stroke();
+        }
+      }
+
+      // ═══ LAYER 4: RIFTS ═══
+      const pulse = 0.8 + 0.2 * Math.sin(t / 500);
+      for (const rift of st.rifts) {
+        const rx = Math.round(w2sx(rift.pos[0]) + CELL / 2);
+        const ry = Math.round(w2sy(rift.pos[1]) + CELL / 2);
+        const riftColor = COLORS.riftType[rift.rift_type] || COLORS.accent;
+        const glowR = Math.max(8, 3 * CELL * rift.richness_pct * pulse);
+
+        // Outer glow (pre-rendered style via gradient, no shadowBlur)
+        const grad = ctx.createRadialGradient(rx, ry, 0, rx, ry, glowR);
+        grad.addColorStop(0, riftColor + '55');
+        grad.addColorStop(0.5, riftColor + '22');
+        grad.addColorStop(1, riftColor + '00');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(rx, ry, glowR, 0, Math.PI * 2); ctx.fill();
+
+        // Core
+        ctx.fillStyle = riftColor;
+        const coreR = Math.max(2, CELL * 0.35);
+        ctx.beginPath(); ctx.arc(rx, ry, coreR, 0, Math.PI * 2); ctx.fill();
+
+        // Type label
+        ctx.fillStyle = riftColor + 'aa';
+        ctx.font = `bold ${Math.max(7, CELL * 0.4)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(rift.rift_type[0].toUpperCase(), rx, ry + CELL * 0.15);
+      }
+
+      // ═══ LAYER 5: LOBSTERS ═══
+      for (const lob of st.lobsters) {
+        const tier = lob.tier || 'shrimp';
+        const tierColor = COLORS.tier[tier];
+        // Idle bobbing (sine wave offset per entity)
+        const bobY = Math.sin(t * 0.002 + lob.pos[0] * 3 + lob.pos[1] * 7) * 0.8;
+        const lx = w2sx(lob.pos[0]) + CELL / 2;
+        const ly = w2sy(lob.pos[1]) + CELL / 2 + bobY;
+        const isSpeaking = lob.speaking && lob.speaking.length > 0;
+
+        // Pick sprite size — generous sizing so creatures are visible
+        const baseSizes = { shrimp: 0.75, lobster: 0.9, kraken: 1.1 };
+        const screenSize = Math.max(8, Math.round(CELL * (baseSizes[tier] || 0.8)));
+        // Quantize to LOD levels for cache efficiency
+        const lodSize = screenSize <= 10 ? 10 : screenSize <= 14 ? 14 : screenSize <= 20 ? 20 : screenSize <= 28 ? 28 : 36;
+
+        if (!lob.alive) {
+          const sprite = getSprite(tier, lodSize, 'dead');
+          const dx = Math.round(lx - sprite.width / 2);
+          const dy = Math.round(ly - sprite.height / 2);
+          ctx.globalAlpha = 0.3;
+          ctx.drawImage(sprite, dx, dy);
+          ctx.globalAlpha = 1;
+          continue;
+        }
+
+        // Glow halo (pre-rendered, additive blend)
+        const glowSize = Math.round(Math.max(16, CELL * 1.5));
+        const glow = getGlow(tierColor, glowSize);
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.drawImage(glow, Math.round(lx - glowSize / 2), Math.round(ly - glowSize / 2));
+        ctx.globalCompositeOperation = 'source-over';
+
+        // Entity sprite
+        const sprite = getSprite(tier, lodSize, 'alive');
+        ctx.drawImage(sprite, Math.round(lx - sprite.width / 2), Math.round(ly - sprite.height / 2));
+
+        // Speaking: expanding ring(s)
+        if (isSpeaking) {
+          const wave1 = ((t % 800) / 800);
+          const wave2 = (((t + 400) % 800) / 800);
+          for (const wave of [wave1, wave2]) {
+            const alpha = Math.max(0, 0.6 - wave * 0.6);
+            const radius = CELL * 0.5 + wave * CELL * 2.5;
+            ctx.strokeStyle = `rgba(255, 224, 130, ${alpha})`;
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(Math.round(lx), Math.round(ly), radius, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+
+        // Grace shield
+        if (lob.grace) {
+          const gPulse = 0.4 + 0.6 * Math.abs(Math.sin(t / 300));
+          ctx.strokeStyle = `rgba(109, 212, 227, ${gPulse})`;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.arc(Math.round(lx), Math.round(ly), screenSize + 4, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // Colony star
+        if (lob.colony) {
+          ctx.fillStyle = 'rgba(255, 200, 50, 0.9)';
+          ctx.font = `${Math.max(7, CELL * 0.4)}px monospace`;
+          ctx.textAlign = 'center';
+          ctx.fillText('\u2605', Math.round(lx), Math.round(ly - screenSize - 3));
+        }
+
+        // Selected highlight
+        const sel = selectedRef.current;
+        if (sel && sel.id === lob.id) {
+          ctx.strokeStyle = COLORS.gold;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(Math.round(lx), Math.round(ly), screenSize + 6, 0, Math.PI * 2);
+          ctx.stroke();
+          // Vision radius
+          const vision = tier === 'kraken' ? 25 : tier === 'lobster' ? 12 : 5;
+          ctx.strokeStyle = tierColor + '30';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.arc(Math.round(lx), Math.round(ly), vision * CELL, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      // ═══ LAYER 6: PREDATORS ═══
+      for (const pred of st.predators) {
+        const px = Math.round(w2sx(pred.pos[0]) + CELL / 2);
+        const py = Math.round(w2sy(pred.pos[1]) + CELL / 2);
+        const s = Math.max(4, CELL * 0.6);
+
+        // Predator glow (pre-rendered)
+        const pGlowSize = Math.round(Math.max(20, CELL * 2.5));
+        const pGlow = getGlow(COLORS.predator, pGlowSize);
+        ctx.globalCompositeOperation = 'lighter';
+        const pulseFactor = 0.7 + 0.3 * Math.sin(t / 200);
+        ctx.globalAlpha = pulseFactor;
+        ctx.drawImage(pGlow, Math.round(px - pGlowSize / 2), Math.round(py - pGlowSize / 2));
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+
+        // Body: dark core circle + red outer
+        ctx.fillStyle = COLORS.predator;
+        ctx.beginPath(); ctx.arc(px, py, s * 0.6, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = COLORS.predatorDark;
+        ctx.beginPath(); ctx.arc(px, py, s * 0.3, 0, Math.PI * 2); ctx.fill();
+
+        // Eye
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(px, py - s * 0.15, Math.max(1, s * 0.12), 0, Math.PI * 2); ctx.fill();
+      }
+
+      // ═══ LAYER 7: EFFECT PARTICLES ═══
+      for (const p of particlePool) {
+        if (!p.active) continue;
+        const px = Math.round(w2sx(p.x));
+        const py = Math.round(w2sy(p.y));
+        const alpha = 1 - p.life / p.maxLife;
+        const sz = p.size * (1 - p.life / p.maxLife * 0.5);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(px, py, Math.max(1, Math.round(sz)), Math.max(1, Math.round(sz)));
+      }
+      ctx.globalAlpha = 1;
+
+      // ═══ LAYER 8: FLOATING SOUND TEXT ═══
+      const floats = floatingTextsRef.current;
+      for (const ft of floats) {
+        const age = now - ft.born;
+        if (age > 2500) continue;
+        const alpha = Math.max(0, 1 - age / 2500);
+        const fx = Math.round(w2sx(ft.x) + CELL / 2);
+        const fy = Math.round(w2sy(ft.y) - CELL * 0.5 - age / 100);
+
+        ctx.fillStyle = `rgba(255, 224, 130, ${alpha})`;
+        ctx.font = `bold ${Math.max(9, CELL * 0.5)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(ft.text, fx, fy);
+      }
+      // Trim dead floats periodically
+      if (t % 500 < 17) {
+        floatingTextsRef.current = floatingTextsRef.current.filter(f => now - f.born < 2500);
+      }
+
+      // ═══ CAMERA INFO HUD (top-left overlay on canvas) ═══
+      if (!cam.autoFollow) {
+        ctx.fillStyle = 'rgba(0, 12, 24, 0.6)';
+        ctx.fillRect(8, 8, 140, 20);
+        ctx.fillStyle = '#8899AA';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('Manual cam | F = reset | Dbl-click', 12, 22);
+      }
+
       raf = requestAnimationFrame(animate);
     };
     raf = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(raf);
-  }, [state]);
+  }, []);
 
-  // Click handler (uses same camera as renderer, in CSS pixel space)
-  const handleCanvasClick = useCallback((e) => {
-    if (!state) return;
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    // Convert to CSS pixels (same coordinate space as drawing)
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const cssSize = rect.width; // square canvas
-
-    // Same camera math as renderer
-    const az = state.active_zone || { min: 30, max: 69, size: 40 };
-    const pad = 2;
-    const camMin = Math.max(0, az.min - pad);
-    const camSize = az.size + pad * 2;
-    const CELL = cssSize / camSize;
-
-    let found = null;
-    let minDist = Infinity;
-    for (const lob of state.lobsters) {
-      const lx = (lob.pos[0] - camMin) * CELL + CELL / 2;
-      const ly = (lob.pos[1] - camMin) * CELL + CELL / 2;
-      const d = Math.sqrt((mx - lx) ** 2 + (my - ly) ** 2);
-      if (d < CELL * 2 && d < minDist) {
-        minDist = d;
-        found = lob;
-      }
-    }
-    setSelected(found);
-  }, [state]);
-
+  // ─── Loading screen ───
   if (!state) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: COLORS.accent }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 48, marginBottom: 16 }}>BLUB</div>
-          <div style={{ color: COLORS.textDim }}>
-            {connected ? 'Waiting for data...' : 'Connecting to ocean...'}
+          <div style={{ fontSize: 48, fontWeight: 'bold', color: COLORS.accent, letterSpacing: 8 }}>BLUB</div>
+          <div style={{ color: COLORS.textDim, marginTop: 12 }}>
+            {connected ? 'Waiting for ocean data...' : 'Connecting to ocean...'}
           </div>
         </div>
       </div>
     );
   }
 
-  const s = state.stats;
-  const topLobsters = [...state.lobsters]
-    .sort((a, b) => b.net_credits - a.net_credits)
-    .slice(0, 10);
+  const s = state.stats || {};
+  const topLobsters = [...state.lobsters].sort((a, b) => b.net_credits - a.net_credits).slice(0, 10);
 
   return (
     <div style={{ display: 'flex', height: '100vh', gap: 0 }}>
-      {/* Left: Ocean Canvas */}
+      {/* LEFT: Sidebar */}
+      {sidebarVisible && (
+        <div className="sidebar" style={{
+          width: 300,
+          background: 'rgba(6, 14, 28, 0.95)',
+          borderRight: `1px solid rgba(0, 200, 255, 0.1)`,
+          padding: 14,
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+        }}>
+          {/* Header */}
+          <div style={{ textAlign: 'center', padding: '4px 0 8px' }}>
+            <div style={{ fontSize: 28, fontWeight: 'bold', color: COLORS.accent, letterSpacing: 6 }}>BLUB</div>
+            <div style={{ color: '#556677', fontSize: 10, letterSpacing: 2 }}>OCEAN SIMULATION</div>
+          </div>
+
+          {/* Epoch info */}
+          <Panel title="EPOCH">
+            <Row label="Tick" value={state.tick} />
+            <Row label="Epoch" value={state.epoch} />
+            <Row label="Remaining" value={state.epoch_ticks_remaining} />
+            <Row label="Epoch Pool" value={`${(s.epoch_pool || 0).toLocaleString()} BLUB`} color={COLORS.gold} />
+          </Panel>
+
+          {/* World stats */}
+          <Panel title="WORLD">
+            <Row label="Active Zone" value={state.active_zone ? `${state.active_zone.size}x${state.active_zone.size}` : '?'} color={COLORS.accent} />
+            <Row label="Lobsters" value={`${s.alive_lobsters} / ${s.total_lobsters}`} />
+            <Row label="Rifts" value={s.active_rifts} color={COLORS.accent} />
+            <Row label="Predators" value={state.predators.length} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
+            {state.colonies && state.colonies.length > 0 && (
+              <Row label="Colonies" value={state.colonies.length} color={COLORS.gold} />
+            )}
+          </Panel>
+
+          {/* Language Metrics with sparklines */}
+          {state.metrics && state.metrics.tick && (
+            <Panel title="LANGUAGE METRICS">
+              <MetricCard label="MI" value={state.metrics.mutual_info?.toFixed(2)} data={metricsHistoryRef.current.mutual_info} color={COLORS.accent} good={state.metrics.mutual_info > 2} />
+              <MetricCard label="TopSim" value={state.metrics.top_sim?.toFixed(3)} data={metricsHistoryRef.current.top_sim} color="#E040FB" good={state.metrics.top_sim > 0.1} />
+              <MetricCard label="PosDis" value={state.metrics.pos_dis?.toFixed(3)} data={metricsHistoryRef.current.pos_dis} color="#FFB000" good={state.metrics.pos_dis > 0.2} />
+              <MetricCard label="CSR" value={state.metrics.csr != null ? `${(state.metrics.csr * 100).toFixed(0)}%` : '-'} data={metricsHistoryRef.current.csr} color="#69F0AE" good={state.metrics.csr > 0.3} />
+              <MetricCard label="Vocab" value={state.metrics.vocab_argmax || state.metrics.vocabulary_size || 0} data={metricsHistoryRef.current.vocabulary_size} color={COLORS.signal} good={state.metrics.vocabulary_size > 30} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, marginTop: 4, color: '#556677' }}>
+                <span>Food trails: {state.metrics.food_trail_cells || 0}</span>
+                <span>Danger: {state.metrics.danger_trail_cells || 0}</span>
+              </div>
+            </Panel>
+          )}
+
+          {/* Leaderboard */}
+          <Panel title="LEADERBOARD">
+            {topLobsters.map((lob, i) => (
+              <div
+                key={lob.id}
+                style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '3px 0', cursor: 'pointer',
+                  color: selected?.id === lob.id ? COLORS.gold : COLORS.text,
+                  opacity: lob.alive ? 1 : 0.35,
+                }}
+                onClick={() => setSelected(lob)}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ color: '#556677', fontSize: 10 }}>#{i + 1}</span>
+                  <span style={{
+                    display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                    background: COLORS.tier[lob.tier] || COLORS.tier.shrimp,
+                  }} />
+                  <span style={{ color: COLORS.tier[lob.tier] || COLORS.tier.shrimp, fontSize: 11 }}>
+                    {lob.name || lob.id}
+                  </span>
+                  {lob.agent_type && (
+                    <span style={{ color: TYPE_COLOR[lob.agent_type], fontSize: 9 }}>
+                      {TYPE_TAG[lob.agent_type]}
+                    </span>
+                  )}
+                </span>
+                <span style={{ color: COLORS.accent, fontSize: 11 }}>{lob.net_credits.toFixed(0)}</span>
+              </div>
+            ))}
+          </Panel>
+
+          {/* Last epoch winner */}
+          {s.last_epoch_top_earner && s.last_epoch_top_earner.id && (
+            <Panel title="EPOCH WINNER">
+              <Row label="Agent" value={s.last_epoch_top_earner.id} color={COLORS.gold} />
+              <Row label="Reward" value={`${s.last_epoch_top_earner.reward.toLocaleString()} BLUB`} color={COLORS.gold} />
+            </Panel>
+          )}
+
+          {/* Emergent Dictionary */}
+          {state.emergent_dictionary && state.emergent_dictionary.length > 0 && (
+            <Panel title="EMERGENT DICTIONARY">
+              <div style={{ fontSize: 10 }}>
+                {state.emergent_dictionary.slice(0, 10).map(entry => {
+                  const barWidth = Math.round(entry.confidence * 100);
+                  const meaningColor = entry.meaning === 'near_rift' ? COLORS.accent
+                    : entry.meaning === 'danger' ? COLORS.predator
+                    : entry.meaning === 'crowded' ? COLORS.gold
+                    : COLORS.textDim;
+                  return (
+                    <div key={entry.sound} style={{ marginBottom: 4 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: COLORS.signal, fontWeight: 'bold' }}>{entry.sound}</span>
+                        <span style={{ color: meaningColor, fontSize: 9 }}>{entry.meaning}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <div style={{ flex: 1, height: 3, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                          <div style={{
+                            width: `${barWidth}%`, height: '100%', borderRadius: 2,
+                            background: barWidth > 70 ? '#69F0AE' : barWidth > 40 ? COLORS.signal : '#FF6B6B',
+                            opacity: 0.8,
+                          }} />
+                        </div>
+                        <span style={{ color: '#556677', fontSize: 8, minWidth: 28, textAlign: 'right' }}>
+                          {Math.round(entry.confidence * 100)}%
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
+          )}
+
+          {/* Epoch Chart */}
+          {state.epoch_history && state.epoch_history.length >= 2 && (
+            <Panel title="EPOCH REWARDS">
+              <EpochChart data={state.epoch_history} />
+            </Panel>
+          )}
+
+          {/* Selected lobster */}
+          {selected && (
+            <Panel title={`SELECTED: ${selected.name || selected.id}`}>
+              <Row label="Position" value={`(${selected.pos[0]}, ${selected.pos[1]})`} />
+              <Row label="Tier" value={selected.tier} color={COLORS.tier[selected.tier]} />
+              <Row label="Credits" value={selected.net_credits.toFixed(1)} color={COLORS.accent} />
+              <Row label="Status" value={selected.alive ? 'ALIVE' : 'DEAD'} color={selected.alive ? COLORS.success : COLORS.predator} />
+              {selected.grace && <Row label="Shield" value="ACTIVE" color={COLORS.accent} />}
+              {selected.agent_type && <Row label="Type" value={selected.agent_type} color={TYPE_COLOR[selected.agent_type]} />}
+              {selected.speaking && selected.speaking.length > 0 && (
+                <Row label="Speaking" value={selected.speaking.join(' ')} color={COLORS.signal} />
+              )}
+            </Panel>
+          )}
+
+          {/* Legend */}
+          <Panel title="LEGEND">
+            <LegendItem color={COLORS.tier.shrimp} label="Shrimp" />
+            <LegendItem color={COLORS.tier.lobster} label="Lobster" />
+            <LegendItem color={COLORS.tier.kraken} label="Kraken" />
+            <div style={{ height: 4 }} />
+            <LegendItem color={COLORS.riftType.gold} label="Gold rift" />
+            <LegendItem color={COLORS.riftType.silver} label="Silver rift" />
+            <LegendItem color={COLORS.riftType.copper} label="Copper rift" />
+            <div style={{ height: 4 }} />
+            <LegendItem color={COLORS.predator} label="Predator" />
+            <LegendItem color={COLORS.food} label="Food trail" />
+            <LegendItem color="#FF6B6B" label="Danger trail" />
+            <LegendItem color="rgba(255,200,50,0.7)" label="Colony" />
+            <div style={{ borderTop: '1px solid rgba(0,200,255,0.1)', marginTop: 4, paddingTop: 4 }}>
+              <div style={{ fontSize: 9, color: '#556677' }}>
+                Scroll zoom | Drag pan | F reset | Tab sidebar
+              </div>
+            </div>
+          </Panel>
+
+          {/* Connection */}
+          <div style={{ fontSize: 10, color: '#556677', marginTop: 'auto', textAlign: 'center' }}>
+            <span style={{ color: connected ? COLORS.success : COLORS.predator }}>
+              {connected ? '\u25CF' : '\u25CB'}
+            </span>{' '}
+            {connected ? 'Connected' : 'Disconnected'}
+          </div>
+        </div>
+      )}
+
+      {/* RIGHT: Ocean Canvas */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        <div ref={canvasContainerRef} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', maxHeight: 'calc(100vh - 160px)' }}>
-        <canvas
-          ref={canvasRef}
-          onClick={handleCanvasClick}
-          style={{
-            cursor: 'crosshair',
-          }}
-        />
+        <div ref={containerRef} style={{
+          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          overflow: 'hidden', maxHeight: 'calc(100vh - 140px)',
+        }}>
+          <canvas
+            ref={canvasRef}
+            onClick={handleCanvasClick}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            onDoubleClick={handleDoubleClick}
+            style={{ cursor: 'crosshair' }}
+          />
         </div>
         {/* Sound log */}
-        <div style={{
-          height: 160,
+        <div className="sound-log" style={{
+          height: 140,
           background: COLORS.panel,
-          borderTop: `1px solid ${COLORS.panelBorder}`,
+          borderTop: `1px solid rgba(0,200,255,0.1)`,
           overflowY: 'auto',
           padding: '8px 12px',
-          fontSize: 12,
+          fontSize: 11,
         }}>
-          <div style={{ color: COLORS.textDim, marginBottom: 4, fontWeight: 'bold' }}>
+          <div style={{ color: COLORS.textDim, marginBottom: 4, fontWeight: 'bold', fontSize: 10, letterSpacing: 1 }}>
             SOUND LOG
           </div>
           {soundLog.map(entry => (
             <div key={entry.key} style={{ marginBottom: 2, lineHeight: 1.4 }}>
-              <span style={{ color: COLORS.textDim }}>[{entry.tick}]</span>{' '}
+              <span style={{ color: '#556677' }}>[{entry.tick}]</span>{' '}
               <span style={{ color: COLORS.accent }}>{entry.from}</span>:{' '}
-              <span style={{ color: COLORS.sound }}>"{entry.sounds.join(' ')}"</span>
+              <span style={{ color: COLORS.signal }}>"{entry.sounds.join(' ')}"</span>
             </div>
           ))}
           {soundLog.length === 0 && (
-            <div style={{ color: COLORS.textDim, fontStyle: 'italic' }}>No sounds yet...</div>
+            <div style={{ color: '#445566', fontStyle: 'italic' }}>No sounds yet...</div>
           )}
-        </div>
-      </div>
-
-      {/* Right: Stats Panel */}
-      <div style={{
-        width: 280,
-        background: COLORS.panel,
-        borderLeft: `1px solid ${COLORS.panelBorder}`,
-        padding: 16,
-        overflowY: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 16,
-      }}>
-        {/* Header */}
-        <div>
-          <div style={{ fontSize: 24, fontWeight: 'bold', color: COLORS.accent, letterSpacing: 4 }}>
-            BLUB
-          </div>
-          <div style={{ color: COLORS.textDim, fontSize: 11 }}>OCEAN SIMULATION</div>
-        </div>
-
-        {/* Epoch info */}
-        <Panel title="EPOCH">
-          <Row label="Tick" value={state.tick} />
-          <Row label="Epoch" value={state.epoch} />
-          <Row label="Remaining" value={state.epoch_ticks_remaining} />
-          <Row label="Epoch Pool" value={`${(s.epoch_pool || 0).toLocaleString()} BLUB`} color={COLORS.gold} />
-        </Panel>
-
-        {/* World stats */}
-        <Panel title="WORLD">
-          <Row label="Active Zone" value={state.active_zone ? `${state.active_zone.size}x${state.active_zone.size}` : '?'} color={COLORS.accent} />
-          <Row label="Lobsters" value={`${s.alive_lobsters} / ${s.total_lobsters}`} />
-          <Row label="Active Rifts" value={s.active_rifts} color={COLORS.rift} />
-          <Row label="Predators" value={state.predators.length} color={state.predators.length > 0 ? COLORS.predator : COLORS.text} />
-          <Row label="Credits Earned" value={s.total_credits_earned?.toLocaleString()} />
-          <Row label="Credits on Sounds" value={s.total_credits_spent_on_sounds?.toLocaleString()} />
-          {state.colonies && state.colonies.length > 0 && (
-            <Row label="Colonies" value={state.colonies.length} color={COLORS.gold} />
-          )}
-          {state.pheromones && (
-            <Row label="Trail Cells" value={state.pheromones.length} color="rgba(0,255,180,0.8)" />
-          )}
-        </Panel>
-
-        {/* Metrics */}
-        {state.metrics && state.metrics.tick && (
-          <Panel title="LANGUAGE METRICS">
-            <Row label="Vocabulary" value={state.metrics.vocabulary_size} color={COLORS.accent} />
-            <Row label="TopSim" value={state.metrics.top_sim?.toFixed(3)} color={state.metrics.top_sim > 0.3 ? '#2ed573' : COLORS.text} />
-            <Row label="PosDis" value={state.metrics.pos_dis?.toFixed(3)} color={state.metrics.pos_dis > 0.2 ? '#2ed573' : COLORS.text} />
-            <Row label="BosDis" value={state.metrics.bos_dis?.toFixed(3)} color={state.metrics.bos_dis > 0.2 ? '#2ed573' : COLORS.text} />
-            <Row label="MI" value={state.metrics.mutual_info?.toFixed(3)} color={state.metrics.mutual_info > 0.5 ? '#2ed573' : COLORS.text} />
-            <Row label="Econ Delta" value={state.metrics.economic_delta?.toFixed(1)} color={state.metrics.economic_delta > 0 ? '#2ed573' : COLORS.predator} />
-            <Row label="CSR" value={state.metrics.csr != null ? `${(state.metrics.csr * 100).toFixed(1)}%` : '-'} color={state.metrics.csr > 0.3 ? '#2ed573' : COLORS.text} />
-            {state.metrics.colony_count > 0 && (
-              <Row label="Colonies" value={`${state.metrics.colony_count} (avg ${state.metrics.avg_colony_size})`} color={COLORS.gold} />
-            )}
-            <Row label="Food Trails" value={state.metrics.food_trail_cells || 0} color="rgba(0,255,180,0.8)" />
-            <Row label="Danger Trails" value={state.metrics.danger_trail_cells || 0} color={COLORS.predator} />
-            <div style={{ fontSize: 8, color: COLORS.textDim, marginTop: 4, textAlign: 'center' }}>
-              CSR: heard sound → reached rift in 10 ticks
-            </div>
-          </Panel>
-        )}
-
-        {/* Leaderboard */}
-        <Panel title="LEADERBOARD">
-          {topLobsters.map((lob, i) => (
-            <div
-              key={lob.id}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                padding: '3px 0',
-                cursor: 'pointer',
-                color: selected?.id === lob.id ? COLORS.gold : COLORS.text,
-                opacity: lob.alive ? 1 : 0.4,
-              }}
-              onClick={() => setSelected(lob)}
-            >
-              <span>
-                <span style={{ color: COLORS.textDim }}>#{i + 1}</span>{' '}
-                <span style={{ color: COLORS.tier[lob.tier] || COLORS.tier.shrimp }}>
-                  {lob.id}
-                </span>{' '}
-                {lob.agent_type && (
-                  <span style={{ color: TYPE_COLOR[lob.agent_type] || COLORS.textDim, fontSize: 10 }}>
-                    {TYPE_TAG[lob.agent_type] || ''}
-                  </span>
-                )}
-              </span>
-              <span style={{ color: COLORS.accent }}>{lob.net_credits.toFixed(1)}</span>
-            </div>
-          ))}
-        </Panel>
-
-        {/* Last epoch top earner */}
-        {s.last_epoch_top_earner && s.last_epoch_top_earner.id && (
-          <Panel title="LAST EPOCH WINNER">
-            <Row label="Agent" value={s.last_epoch_top_earner.id} color={COLORS.gold} />
-            <Row label="Reward" value={`${s.last_epoch_top_earner.reward.toLocaleString()} BLUB`} color={COLORS.gold} />
-          </Panel>
-        )}
-
-        {/* Emergent Dictionary */}
-        {state.emergent_dictionary && state.emergent_dictionary.length > 0 && (
-          <Panel title="EMERGENT DICTIONARY">
-            <div style={{ fontSize: 10 }}>
-              {state.emergent_dictionary.slice(0, 12).map(entry => {
-                const barWidth = Math.round(entry.confidence * 100);
-                const meaningColor = entry.meaning === 'near_rift' ? COLORS.rift
-                  : entry.meaning === 'danger' ? COLORS.predator
-                  : entry.meaning === 'crowded' ? COLORS.gold
-                  : COLORS.textDim;
-                return (
-                  <div key={entry.sound} style={{ marginBottom: 3 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: COLORS.sound, fontWeight: 'bold' }}>{entry.sound}</span>
-                      <span style={{ color: meaningColor, fontSize: 9 }}>{entry.meaning}</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <div style={{
-                        flex: 1, height: 3, background: COLORS.panelBorder, borderRadius: 2,
-                      }}>
-                        <div style={{
-                          width: `${barWidth}%`, height: '100%', borderRadius: 2,
-                          background: meaningColor,
-                          opacity: 0.7,
-                        }} />
-                      </div>
-                      <span style={{ color: COLORS.textDim, fontSize: 8, minWidth: 28, textAlign: 'right' }}>
-                        {Math.round(entry.confidence * 100)}%
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-              <div style={{ color: COLORS.textDim, fontSize: 8, marginTop: 4, textAlign: 'center' }}>
-                server-side ground truth correlations
-              </div>
-            </div>
-          </Panel>
-        )}
-
-        {/* Epoch Chart (SVG line chart S vs G vs R) */}
-        {state.epoch_history && state.epoch_history.length >= 2 && (
-          <Panel title="EPOCH REWARDS">
-            {(() => {
-              const data = state.epoch_history;
-              const W = 240, H = 80, PAD = 20;
-              const plotW = W - PAD * 2, plotH = H - PAD;
-              const maxVal = Math.max(...data.flatMap(d =>
-                ['social','greedy','random'].map(t => d.types[t]?.total_reward || 0)
-              ));
-              const xStep = data.length > 1 ? plotW / (data.length - 1) : 0;
-
-              const makeLine = (type) => {
-                return data.map((d, i) => {
-                  const v = d.types[type]?.total_reward || 0;
-                  const x = PAD + i * xStep;
-                  const y = PAD + plotH - (maxVal > 0 ? (v / maxVal) * plotH : 0);
-                  return `${x},${y}`;
-                }).join(' ');
-              };
-
-              const fmt = (v) => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(0)}k` : v;
-
-              return (
-                <svg width={W} height={H} style={{ display: 'block' }}>
-                  {/* Grid lines */}
-                  <line x1={PAD} y1={PAD} x2={PAD} y2={H} stroke={COLORS.panelBorder} strokeWidth="1" />
-                  <line x1={PAD} y1={H} x2={W - PAD} y2={H} stroke={COLORS.panelBorder} strokeWidth="1" />
-                  {/* Max value label */}
-                  <text x={PAD - 2} y={PAD + 4} fill={COLORS.textDim} fontSize="7" textAnchor="end">{fmt(maxVal)}</text>
-                  <text x={PAD - 2} y={H} fill={COLORS.textDim} fontSize="7" textAnchor="end">0</text>
-
-                  {/* Lines */}
-                  <polyline points={makeLine('social')} fill="none" stroke={TYPE_COLOR.social} strokeWidth="2" />
-                  <polyline points={makeLine('greedy')} fill="none" stroke={TYPE_COLOR.greedy} strokeWidth="2" strokeDasharray="4 2" />
-                  <polyline points={makeLine('random')} fill="none" stroke={TYPE_COLOR.random} strokeWidth="1.5" strokeDasharray="2 2" />
-
-                  {/* Dots for last epoch */}
-                  {['social','greedy','random'].map(type => {
-                    const lastIdx = data.length - 1;
-                    const v = data[lastIdx].types[type]?.total_reward || 0;
-                    const x = PAD + lastIdx * xStep;
-                    const y = PAD + plotH - (maxVal > 0 ? (v / maxVal) * plotH : 0);
-                    return <circle key={type} cx={x} cy={y} r="3" fill={TYPE_COLOR[type]} />;
-                  })}
-
-                  {/* Epoch labels */}
-                  {data.map((d, i) => (
-                    <text key={i} x={PAD + i * xStep} y={H + 1} fill={COLORS.textDim} fontSize="7" textAnchor="middle">
-                      {d.epoch}
-                    </text>
-                  ))}
-                </svg>
-              );
-            })()}
-            {/* Compact legend */}
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 2 }}>
-              {[['S', TYPE_COLOR.social], ['G', TYPE_COLOR.greedy], ['R', TYPE_COLOR.random]].map(([label, color]) => (
-                <span key={label} style={{ fontSize: 9, color }}>{label}</span>
-              ))}
-            </div>
-          </Panel>
-        )}
-
-        {/* Epoch History Table */}
-        {state.epoch_history && state.epoch_history.length > 0 && (
-          <Panel title="EPOCH HISTORY">
-            <div style={{ fontSize: 10, overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${COLORS.panelBorder}` }}>
-                    <th style={{ textAlign: 'left', padding: '2px 4px', color: COLORS.textDim }}>E</th>
-                    <th style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.social }}>S</th>
-                    <th style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.greedy }}>G</th>
-                    <th style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.random }}>R</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {state.epoch_history.map(eh => {
-                    const s = eh.types.social;
-                    const g = eh.types.greedy;
-                    const r = eh.types.random;
-                    const maxReward = Math.max(s?.total_reward || 0, g?.total_reward || 0, r?.total_reward || 0);
-                    const fmt = (v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v;
-                    return (
-                      <tr key={eh.epoch} style={{ borderBottom: `1px solid ${COLORS.panelBorder}22` }}>
-                        <td style={{ padding: '2px 4px', color: COLORS.textDim }}>{eh.epoch}</td>
-                        <td style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.social, fontWeight: s && s.total_reward === maxReward ? 'bold' : 'normal' }}>
-                          {s ? fmt(s.total_reward) : '-'}
-                        </td>
-                        <td style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.greedy, fontWeight: g && g.total_reward === maxReward ? 'bold' : 'normal' }}>
-                          {g ? fmt(g.total_reward) : '-'}
-                        </td>
-                        <td style={{ textAlign: 'right', padding: '2px 4px', color: TYPE_COLOR.random, fontWeight: r && r.total_reward === maxReward ? 'bold' : 'normal' }}>
-                          {r ? fmt(r.total_reward) : '-'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {/* Group hits comparison for last epoch */}
-              {(() => {
-                const last = state.epoch_history[state.epoch_history.length - 1];
-                if (!last) return null;
-                const types = ['social', 'greedy', 'random'];
-                return (
-                  <div style={{ marginTop: 6, borderTop: `1px solid ${COLORS.panelBorder}`, paddingTop: 4 }}>
-                    <div style={{ color: COLORS.textDim, marginBottom: 2 }}>Last epoch details:</div>
-                    {types.map(t => {
-                      const d = last.types[t];
-                      if (!d) return null;
-                      return (
-                        <div key={t} style={{ display: 'flex', justifyContent: 'space-between', padding: '1px 0' }}>
-                          <span style={{ color: TYPE_COLOR[t] }}>{t}</span>
-                          <span style={{ color: COLORS.textDim }}>
-                            grp:{d.group_hits} deaths:{d.deaths}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
-            </div>
-          </Panel>
-        )}
-
-        {/* Selected lobster info */}
-        {selected && (
-          <Panel title={`SELECTED: ${selected.id}`}>
-            <Row label="Name" value={selected.name} />
-            <Row label="Position" value={`(${selected.pos[0]}, ${selected.pos[1]})`} />
-            <Row label="Tier" value={selected.tier} color={COLORS.tier[selected.tier]} />
-            <Row label="Net Credits" value={selected.net_credits.toFixed(2)} color={COLORS.accent} />
-            <Row label="Alive" value={selected.alive ? 'YES' : 'DEAD'} color={selected.alive ? '#2ed573' : COLORS.predator} />
-            {selected.grace && (
-              <Row label="Shield" value="ACTIVE" color={COLORS.accent} />
-            )}
-            {selected.agent_type && (
-              <Row label="Type" value={selected.agent_type} color={TYPE_COLOR[selected.agent_type]} />
-            )}
-            {selected.speaking && selected.speaking.length > 0 && (
-              <Row label="Speaking" value={selected.speaking.join(' ')} color={COLORS.sound} />
-            )}
-          </Panel>
-        )}
-
-        {/* Legend */}
-        <Panel title="LEGEND">
-          <LegendItem color={COLORS.tier.shrimp} label="Shrimp (vision 5)" />
-          <LegendItem color={COLORS.tier.lobster} label="Lobster (vision 12)" />
-          <LegendItem color={COLORS.tier.kraken} label="Kraken (vision 25)" />
-          <LegendItem color={COLORS.riftType.gold} label="Gold rift" shape="circle" />
-          <LegendItem color={COLORS.riftType.silver} label="Silver rift" shape="circle" />
-          <LegendItem color={COLORS.riftType.copper} label="Copper rift" shape="circle" />
-          <LegendItem color={COLORS.predator} label="Predator" shape="triangle" />
-          <LegendItem color={COLORS.accent} label="Grace shield (immune)" shape="circle" />
-          <LegendItem color="rgba(0,255,180,0.6)" label="Food trail" />
-          <LegendItem color="rgba(255,50,50,0.5)" label="Danger trail" />
-          <LegendItem color="rgba(255,200,50,0.7)" label="Colony territory" shape="circle" />
-          <div style={{ marginTop: 4, borderTop: `1px solid ${COLORS.panelBorder}`, paddingTop: 4 }}>
-            <LegendItem color={TYPE_COLOR.social} label="(S) Social" />
-            <LegendItem color={TYPE_COLOR.greedy} label="(G) Greedy" />
-            <LegendItem color={TYPE_COLOR.random} label="(R) Random" />
-          </div>
-        </Panel>
-
-        {/* Connection status */}
-        <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 'auto' }}>
-          <span style={{ color: connected ? '#2ed573' : COLORS.predator }}>
-            {connected ? '\u25CF' : '\u25CB'}
-          </span>{' '}
-          {connected ? 'Connected' : 'Disconnected'}
         </div>
       </div>
     </div>
   );
 }
 
-// --- Reusable Components ---
+// ═══════════════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════════════
 function Panel({ title, children }) {
   return (
-    <div style={{
-      background: 'rgba(255,255,255,0.03)',
-      border: `1px solid ${COLORS.panelBorder}`,
-      borderRadius: 6,
-      padding: '10px 12px',
-    }}>
-      <div style={{
-        fontSize: 10,
-        fontWeight: 'bold',
-        color: COLORS.textDim,
-        marginBottom: 6,
-        letterSpacing: 1,
-      }}>
-        {title}
-      </div>
+    <div className="panel">
+      <div className="panel-title">{title}</div>
       {children}
     </div>
   );
@@ -984,35 +1270,87 @@ function Panel({ title, children }) {
 
 function Row({ label, value, color }) {
   return (
-    <div style={{
-      display: 'flex',
-      justifyContent: 'space-between',
-      fontSize: 12,
-      padding: '2px 0',
-    }}>
-      <span style={{ color: COLORS.textDim }}>{label}</span>
-      <span style={{ color: color || COLORS.text }}>{value}</span>
+    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '2px 0' }}>
+      <span style={{ color: '#8899AA' }}>{label}</span>
+      <span style={{ color: color || '#E0E0E0', fontFamily: 'Courier New, monospace' }}>{value}</span>
     </div>
   );
 }
 
-function LegendItem({ color, label, shape }) {
+function LegendItem({ color, label }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '1px 0' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, padding: '1px 0' }}>
       <span style={{
-        display: 'inline-block',
-        width: 8,
-        height: 8,
-        background: color,
-        borderRadius: shape === 'triangle' ? 0 : '50%',
-        clipPath: shape === 'triangle' ? 'polygon(50% 0%, 0% 100%, 100% 100%)' : 'none',
+        display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: color,
       }} />
-      <span style={{ color: COLORS.textDim }}>{label}</span>
+      <span style={{ color: '#8899AA' }}>{label}</span>
     </div>
   );
 }
 
-// --- Mount ---
+function MetricCard({ label, value, data, color, good }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 0' }}>
+      <span style={{ color: '#8899AA', fontSize: 10, minWidth: 48 }}>{label}</span>
+      <Sparkline data={data} color={color} width={70} height={16} />
+      <span style={{
+        color: good ? COLORS.success : '#E0E0E0',
+        fontSize: 12, fontFamily: 'Courier New', minWidth: 48, textAlign: 'right',
+      }}>{value}</span>
+    </div>
+  );
+}
+
+function Sparkline({ data, color, width = 70, height = 16 }) {
+  if (!data || data.length < 2) return <div style={{ width, height }} />;
+  const max = Math.max(...data);
+  const min = Math.min(...data);
+  const range = max - min || 0.001;
+  const points = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * width;
+    const y = height - 1 - ((v - min) / range) * (height - 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return (
+    <svg width={width} height={height} style={{ display: 'block' }}>
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" opacity="0.7" />
+    </svg>
+  );
+}
+
+function EpochChart({ data }) {
+  const W = 260, H = 70, PAD = 20;
+  const plotW = W - PAD * 2, plotH = H - PAD;
+  const maxVal = Math.max(1, ...data.flatMap(d =>
+    ['social', 'greedy', 'random'].map(t => d.types[t]?.total_reward || 0)
+  ));
+  const xStep = data.length > 1 ? plotW / (data.length - 1) : 0;
+  const makeLine = (type) => data.map((d, i) => {
+    const v = d.types[type]?.total_reward || 0;
+    return `${PAD + i * xStep},${PAD + plotH - (v / maxVal) * plotH}`;
+  }).join(' ');
+  const fmt = (v) => v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}k` : v;
+
+  return (
+    <div>
+      <svg width={W} height={H} style={{ display: 'block' }}>
+        <line x1={PAD} y1={PAD} x2={PAD} y2={H} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+        <line x1={PAD} y1={H} x2={W - PAD} y2={H} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+        <text x={PAD - 2} y={PAD + 4} fill="#556677" fontSize="7" textAnchor="end">{fmt(maxVal)}</text>
+        <polyline points={makeLine('social')} fill="none" stroke={TYPE_COLOR.social} strokeWidth="1.5" />
+        <polyline points={makeLine('greedy')} fill="none" stroke={TYPE_COLOR.greedy} strokeWidth="1.5" strokeDasharray="4 2" />
+        <polyline points={makeLine('random')} fill="none" stroke={TYPE_COLOR.random} strokeWidth="1" strokeDasharray="2 2" />
+      </svg>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', fontSize: 9 }}>
+        <span style={{ color: TYPE_COLOR.social }}>Social</span>
+        <span style={{ color: TYPE_COLOR.greedy }}>Greedy</span>
+        <span style={{ color: TYPE_COLOR.random }}>Random</span>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>

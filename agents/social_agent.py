@@ -186,7 +186,8 @@ class GaussianProductionPolicy:
         self.max_len = max_len
         self.lr = lr
         lang = language_cfg or {}
-        self.sigma = lang.get("sigma_start", 1.0)
+        self.sigma_start = lang.get("sigma_start", 1.0)
+        self.sigma = self.sigma_start
         self.sigma_min = lang.get("sigma_min", 0.5)
         self.sigma_anneal = lang.get("sigma_anneal_per_epoch", 0.02)
         self.weight_decay = lang.get("weight_decay", 0.9995)
@@ -491,8 +492,8 @@ class SocialAgent(BlubAgent):
                     continue
                 old = self.comprehension.counts[sidx].get(ctx_key, 0)
                 self.comprehension.counts[sidx][ctx_key] = old + int(count * frac)
-        n_w = sum(len(row) for pos_w in (imported_W or []) for row in pos_w)
-        n_comp = sum(len(v) for v in comp.values())
+        n_w = sum(len(pos_w) if isinstance(pos_w, list) else 1 for pos_w in (imported_W or []))
+        n_comp = sum(len(v) if isinstance(v, dict) else 1 for v in comp.values())
         print(f"[{self.name}] Imported knowledge: {n_w} weights, {n_comp} comp entries (frac={frac})")
 
     def partial_reset(self, retention: float = 0.20):
@@ -518,7 +519,10 @@ class SocialAgent(BlubAgent):
         self.ctx_discoverer.count = 0
         self.last_credits = 0.0
         self.decay_counter = 0
-        print(f"[{self.name}] Partial reset (retention={retention})")
+        # Reset sigma to allow exploration in new life
+        old_sigma = self.production.sigma
+        self.production.sigma = self.production.sigma_start
+        print(f"[{self.name}] Partial reset (retention={retention}, sigma {old_sigma:.3f}->{self.production.sigma:.3f})")
 
     def on_bootstrap(self, data: dict):
         """Called by base_agent after connect — import cultural cache (oblique transmission)."""
