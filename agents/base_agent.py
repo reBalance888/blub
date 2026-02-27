@@ -61,18 +61,22 @@ class BlubAgent:
                 self.state = await resp.json()
                 return self.state
 
-    async def do_action(self, move: str = "stay", speak: list | None = None, act: str | None = None) -> dict:
+    async def do_action(self, move: str = "stay", speak: list | None = None,
+                        act: str | None = None, **kwargs) -> dict:
         """Send an action to the server."""
+        actions = {
+            "move": move,
+            "speak": speak or [],
+            "act": act,
+        }
+        # Pass through extra fields (e.g. role for Phase 2 specialization)
+        actions.update(kwargs)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.server_url}/action",
                 json={
                     "agent_id": self.agent_id,
-                    "actions": {
-                        "move": move,
-                        "speak": speak or [],
-                        "act": act,
-                    },
+                    "actions": actions,
                 },
             ) as resp:
                 return await resp.json()

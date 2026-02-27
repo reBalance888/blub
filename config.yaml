@@ -153,6 +153,48 @@ language:
   sigma_anneal_per_epoch: 0.02
   topo_bonus_scale: 4.0
   weight_decay: 0.9995
+  learning_rate: 0.03               # base lr (varied per-agent by 0.7-1.4x)
+  causal_influence_coeff: 3.0       # intrinsic reward for speaker influence
+  entropy_bonus_coeff: 1.0          # gentle push toward message diversity
+  entropy_min_threshold: 1.0        # minimum entropy (bits) before bonus kicks in
+  context_mode: "factored"          # "factored" (new) or "legacy" (old 6D vector)
+  novelty_holdout_fraction: 0.20    # 20% of feature combos held out
+  novelty_holdout_seed: 42          # deterministic selection
+  features:
+    situation_types: 4
+    target_details: 5
+    urgency_levels: 3
+
+bottleneck:
+  enabled: true
+  retirement_interval: 200          # ticks between forced retirements
+  observation_rate: 0.35            # newborn processes 35% of heard messages
+  learning_period: 300              # ticks of filtered observation
+  min_agents_for_retirement: 25     # don't retire if population too low
+  retire_lowest_earning: true       # retire by credits (false = retire oldest)
+
+specialization:
+  enabled: true
+  initial_threshold: 5.0
+  initial_noise: 0.1
+  threshold_decrease: 0.05          # on task performance
+  threshold_increase: 0.01          # on task skip
+  threshold_min: 0.1
+  threshold_max: 10.0
+  tasks:
+    forage:
+      stimulus_source: "inverse_credits"
+      stimulus_scale: 100.0
+    scout:
+      stimulus_source: "ticks_since_new_rift"
+      stimulus_scale: 200.0
+    guard:
+      stimulus_source: "recent_deaths"
+      stimulus_scale: 10.0
+      lookback_ticks: 50
+    teach:
+      stimulus_source: "newborn_count"
+      stimulus_scale: 5.0
 
 tidal:
   enabled: true                    # kill switch for A/B testing

@@ -40,6 +40,7 @@ class Lobster:
     retired: bool = False  # flagged for replacement
     reward_this_tick: float = 0.0  # rift reward earned THIS tick (for pheromone deposit)
     path_history: list = field(default_factory=list)  # recent positions for trail deposit
+    current_role: str = ""  # Phase 2: agent's dominant role (forage/scout/guard/teach)
 
 
 class Ocean:
@@ -124,6 +125,26 @@ class Ocean:
         # Listener feedback: {listener_id: (speaker_id, tick_heard)}
         self._heard_from: dict[str, tuple[str, int]] = {}
 
+        # Speaker influence tracking (for causal influence intrinsic reward)
+        # {speaker_id: [heard_count, moved_count, last_decay_tick]}
+        self._speaker_influence: dict[str, list] = {}
+        # {listener_id: (speaker_id, tick, orig_x, orig_y)}
+        self._cic_speaker_pending: dict[str, tuple[str, int, int, int]] = {}
+
+        # Phase 2: Factored Meaning Space — novelty holdout set
+        self._novelty_holdout_set: set[tuple[int, int, int]] = set()
+        lang_cfg = config.get("language", {})
+        if lang_cfg.get("context_mode") == "factored":
+            self._init_novelty_holdout(lang_cfg)
+
+        # Phase 2: Bottleneck tracking
+        self._bottleneck_retirements: int = 0
+
+        # Phase 2: Specialization stimuli tracking
+        self._ticks_since_new_rift: int = 0
+        self._recent_deaths_window: list[int] = []  # tick numbers of recent deaths
+        self._current_stimuli: list[float] = [1.0, 1.0, 1.0, 1.0]
+
         # Init first epoch rifts (within active zone)
         zone_min, zone_max = self._active_zone_bounds()
         self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)
@@ -157,6 +178,102 @@ class Ocean:
         x = random.randint(zone_min, zone_max)
         y = random.randint(zone_min, zone_max)
         return x, y
+
+    # ----- Factored Meaning Space (Phase 2) -----
+
+    def _init_novelty_holdout(self, lang_cfg: dict):
+        """Build deterministic set of held-out (situation, target, urgency) combos."""
+        seed = lang_cfg.get("novelty_holdout_seed", 42)
+        frac = lang_cfg.get("novelty_holdout_fraction", 0.20)
+        n_sit = lang_cfg.get("features", {}).get("situation_types", 4)
+        n_tgt = lang_cfg.get("features", {}).get("target_details", 5)
+        n_urg = lang_cfg.get("features", {}).get("urgency_levels", 3)
+
+        rng = random.Random(seed)
+        # For each situation type, hold out ~frac of target x urgency pairs
+        for sit in range(n_sit):
+            combos = [(sit, tgt, urg) for tgt in range(n_tgt) for urg in range(n_urg)]
+            n_holdout = max(1, int(len(combos) * frac))
+            held = rng.sample(combos, n_holdout)
+            self._novelty_holdout_set.update(held)
+        print(f"[FACTORED] Novelty holdout: {len(self._novelty_holdout_set)} combos out of {n_sit * n_tgt * n_urg}")
+
+    def _build_factored_context(self, lob: 'Lobster', state_rifts: list, state_preds: list) -> tuple[int, int, int]:
+        """Convert raw agent surroundings into factored (situation, target, urgency) tuple."""
+        # Get vision range for this lobster's tier
+        tier = self.get_tier(lob)
+        tier_info = self.get_tier_info(tier)
+        vision = tier_info["vision"]
+
+        # Nearby rifts within vision
+        nearby_rifts = []
+        for rift in self.rift_mgr.active_rifts:
+            dx = abs(rift.x - lob.x)
+            dy = abs(rift.y - lob.y)
+            if dx <= vision and dy <= vision:
+                max_r = self.rift_mgr._richness_for_type(rift.rift_type)
+                pct = rift.richness / max_r if max_r > 0 else 0
+                nearby_rifts.append({
+                    "distance": dx + dy,
+                    "richness_pct": pct,
+                    "rift_type": rift.rift_type,
+                })
+
+        # Nearby predators within vision
+        nearby_preds = []
+        for pred in self.predator_mgr.active_predators:
+            dx = abs(pred.x - lob.x)
+            dy = abs(pred.y - lob.y)
+            if dx <= vision and dy <= vision:
+                nearby_preds.append({
+                    "distance": dx + dy,
+                    "type": pred.predator_type,
+                })
+
+        # Feature 1: SITUATION_TYPE
+        nearest_rift = min(nearby_rifts, key=lambda r: r["distance"]) if nearby_rifts else None
+        if nearest_rift:
+            if nearest_rift["richness_pct"] > 0.20:
+                situation = 0  # rift_nearby
+            else:
+                situation = 1  # rift_depleted
+        elif nearby_preds:
+            situation = 2  # predator_nearby
+        else:
+            situation = 3  # exploration
+
+        # Feature 2: TARGET_DETAIL
+        if situation in (0, 1):  # rift
+            target = {"gold": 0, "silver": 1, "copper": 2}.get(nearest_rift["rift_type"], 1)
+        elif situation == 2:  # predator
+            pred_type = min(nearby_preds, key=lambda p: p["distance"])["type"]
+            target = 3 if pred_type == "shark" else 4  # eel/octopus = 4
+        else:  # exploration
+            food_trails = self.pheromone_map.read(lob.x, lob.y, "food", vision)
+            has_trail = any(t["intensity"] > 0.3 for t in food_trails)
+            target = 0 if has_trail else 1
+
+        # Feature 3: URGENCY
+        has_close_predator = any(p["distance"] <= 3 for p in nearby_preds)
+        tidal_state = self.tidal.get_state_for_agent()
+        is_night = tidal_state.get("is_night", False)
+        is_winter = tidal_state.get("seasonal_multiplier", 1.0) < 0.7
+
+        stress_count = sum([has_close_predator, is_night, is_winter])
+        if stress_count >= 2:
+            urgency = 2  # high
+        elif stress_count == 1:
+            urgency = 1  # medium
+        else:
+            urgency = 0  # low
+
+        return (situation, target, urgency)
+
+    def _get_factored_context_for_agent(self, lob: 'Lobster') -> tuple[int, int, int] | None:
+        """Return factored context if enabled, else None."""
+        if self.config.get("language", {}).get("context_mode") != "factored":
+            return None
+        return self._build_factored_context(lob, [], [])
 
     # ----- Agent management -----
 
@@ -197,6 +314,10 @@ class Ocean:
     def submit_action(self, agent_id: str, actions: dict):
         if agent_id in self.lobsters:
             self.pending_actions[agent_id] = actions
+            # Phase 2: capture role from agent action
+            role = actions.get("role")
+            if role is not None:
+                self.lobsters[agent_id].current_role = role
 
     # ----- Tick -----
 
@@ -308,7 +429,10 @@ class Ocean:
                 self.pheromone_map.deposit(rift.x, rift.y, "noentry", ne_deposit * 2)
 
         # 6. Rift depletion & respawn
+        rift_count_before = len(self.rift_mgr.active_rifts)
         self.rift_mgr.tick_rifts(self.tick, tidal_offset=self.tidal.get_rift_offset())
+        if len(self.rift_mgr.active_rifts) > rift_count_before:
+            self._ticks_since_new_rift = 0  # reset scout stimulus
 
         # 7. Death timers
         self._process_death_timers()
@@ -334,6 +458,25 @@ class Ocean:
                 for nx, ny in [(lob.x+1, lob.y), (lob.x-1, lob.y),
                                (lob.x, lob.y+1), (lob.x, lob.y-1)]:
                     self.pheromone_map.deposit_colony_scent(nx, ny, colony.id, cs_neighbor)
+
+        # 7e. Phase 2: Cultural transmission bottleneck
+        self._process_bottleneck()
+
+        # 7f. Phase 2: Compute task stimuli for specialization
+        self._compute_task_stimuli()
+
+        # 7g. Track deaths for stimuli (rolling window)
+        if kill_positions:
+            for _ in kill_positions:
+                self._recent_deaths_window.append(self.tick)
+        lookback = self.config.get("specialization", {}).get("tasks", {}).get(
+            "guard", {}).get("lookback_ticks", 50)
+        self._recent_deaths_window = [
+            t for t in self._recent_deaths_window if self.tick - t <= lookback
+        ]
+
+        # 7h. Track new rift discovery for scout stimulus
+        self._ticks_since_new_rift += 1
 
         # 8. Check epoch end
         if self.epoch_mgr.tick():
@@ -375,6 +518,9 @@ class Ocean:
                 predators_by_type=dict(self._predators_by_type),
                 deaths_by_predator_type=dict(self._deaths_by_predator_type),
                 pheromone_clear_events=self._pheromone_clear_events,
+                # Phase 2 metrics
+                bottleneck_retirements=self._bottleneck_retirements,
+                task_stimuli=list(self._current_stimuli),
             )
             # Reset tidal accumulators
             self._tidal_predators_spawned_day = 0
@@ -385,6 +531,8 @@ class Ocean:
             # Reset predator mosaic accumulators
             self._deaths_by_predator_type = {}
             self._pheromone_clear_events = 0
+            # Reset bottleneck accumulator
+            self._bottleneck_retirements = 0
 
     def _process_movements(self):
         directions = {
@@ -680,6 +828,77 @@ class Ocean:
         # Decay cultural cache
         self.cultural_cache.epoch_decay()
 
+    # ----- Phase 2: Cultural Transmission Bottleneck -----
+
+    def _process_bottleneck(self):
+        """Every retirement_interval ticks, retire lowest earner and replace with newborn."""
+        cfg = self.config.get("bottleneck", {})
+        if not cfg.get("enabled", False):
+            return
+        interval = cfg.get("retirement_interval", 200)
+        if self.tick % interval != 0:
+            return
+        min_agents = cfg.get("min_agents_for_retirement", 25)
+        if len(self.lobsters) < min_agents:
+            return
+
+        # Find lowest-earning social agent (skip very young, skip non-social)
+        candidates = [
+            lob for lob in self.lobsters.values()
+            if lob.alive and lob.age > 100 and lob.agent_type == "social"
+        ]
+        if not candidates:
+            return
+
+        worst = min(candidates, key=lambda a: a.credits_earned)
+
+        # Deposit knowledge to cultural cache before retirement
+        # (the agent-side on_pre_retire handles this; server marks retired)
+        worst.retired = True
+        self._bottleneck_retirements += 1
+        print(f"[BOTTLENECK] Retired {worst.id} ({worst.name}) at tick {self.tick} "
+              f"(credits_earned={worst.credits_earned:.0f}, age={worst.age})")
+
+    # ----- Phase 2: Task Stimuli Computation -----
+
+    def _compute_task_stimuli(self):
+        """Compute global task stimuli for Bonabeau response threshold model."""
+        cfg = self.config.get("specialization", {})
+        if not cfg.get("enabled", False):
+            self._current_stimuli = [1.0, 1.0, 1.0, 1.0]
+            return
+
+        tasks_cfg = cfg.get("tasks", {})
+        alive_agents = [a for a in self.lobsters.values() if a.alive]
+        if not alive_agents:
+            self._current_stimuli = [1.0, 1.0, 1.0, 1.0]
+            return
+
+        # FORAGE stimulus: inverse of average credits earned per tick
+        avg_income = sum(
+            a.credits_earned / max(a.age, 1) for a in alive_agents
+        ) / len(alive_agents)
+        forage_scale = tasks_cfg.get("forage", {}).get("stimulus_scale", 100.0)
+        forage_stim = min(forage_scale / max(avg_income, 0.1), 10.0)
+
+        # SCOUT stimulus: ticks since any new rift discovered
+        scout_scale = tasks_cfg.get("scout", {}).get("stimulus_scale", 200.0)
+        scout_stim = min(self._ticks_since_new_rift / max(scout_scale, 1.0), 10.0)
+
+        # GUARD stimulus: recent deaths in lookback window
+        guard_scale = tasks_cfg.get("guard", {}).get("stimulus_scale", 10.0)
+        guard_stim = min(len(self._recent_deaths_window) / max(guard_scale, 1.0), 10.0)
+
+        # TEACH stimulus: number of newborn agents in learning period
+        # Newborns are agents with age < learning_period from bottleneck config
+        bn_cfg = self.config.get("bottleneck", {})
+        learning_period = bn_cfg.get("learning_period", 300)
+        newborn_count = sum(1 for a in alive_agents if a.age < learning_period)
+        teach_scale = tasks_cfg.get("teach", {}).get("stimulus_scale", 5.0)
+        teach_stim = min(newborn_count / max(teach_scale, 1.0), 10.0)
+
+        self._current_stimuli = [forage_stim, scout_stim, guard_stim, teach_stim]
+
     # ----- CSR (Communication Success Rate) -----
 
     def _track_csr_heard(self):
@@ -732,6 +951,10 @@ class Ocean:
         # CIC: resolve pending heard/silent events (did agent move toward rift within 5 ticks?)
         self._resolve_cic_events()
 
+        # Speaker influence: resolve pending and apply sliding window decay
+        self._resolve_speaker_influence()
+        self._decay_speaker_influence()
+
         # Register new heard events from this tick
         # Also track which social agents heard sounds (for CIC)
         social_heard_this_tick: set[str] = set()
@@ -775,6 +998,11 @@ class Ocean:
 
                     # Listener feedback: record most recent speaker for this listener
                     self._heard_from[lob.id] = (speaker_id, self.tick)
+
+                    # Speaker influence: record pending for per-speaker CIC attribution
+                    if (speaker_type == "social" and lob.agent_type == "social"
+                            and lob.id not in self._cic_speaker_pending):
+                        self._cic_speaker_pending[lob.id] = (speaker_id, self.tick, lob.x, lob.y)
 
                     # CIC: track social listeners that heard sounds
                     if lob.agent_type == "social" and lob.id not in self._cic_heard_pending:
@@ -827,6 +1055,46 @@ class Ocean:
                 resolved.append(agent_id)
         for aid in resolved:
             self._cic_silent_pending.pop(aid, None)
+
+    def _resolve_speaker_influence(self):
+        """Resolve per-speaker CIC: did listener move closer to a rift within 5 ticks?
+        Updates _speaker_influence[speaker_id] = [heard_count, moved_count, last_decay_tick]."""
+        resolved = []
+        for listener_id, (speaker_id, heard_tick, ox, oy) in self._cic_speaker_pending.items():
+            if self.tick - heard_tick < 5:
+                continue
+            resolved.append(listener_id)
+            # Ensure speaker entry exists
+            if speaker_id not in self._speaker_influence:
+                self._speaker_influence[speaker_id] = [0, 0, self.tick]
+            self._speaker_influence[speaker_id][0] += 1  # heard_count
+            # Check if listener moved closer to any rift
+            lob = self.lobsters.get(listener_id)
+            if not lob or not lob.alive:
+                continue
+            for rift in self.rift_mgr.active_rifts:
+                old_dist = abs(ox - rift.x) + abs(oy - rift.y)
+                new_dist = abs(lob.x - rift.x) + abs(lob.y - rift.y)
+                if new_dist < old_dist:
+                    self._speaker_influence[speaker_id][1] += 1  # moved_count
+                    break
+        for lid in resolved:
+            self._cic_speaker_pending.pop(lid, None)
+
+    def _decay_speaker_influence(self):
+        """Sliding window decay: every 50 ticks, multiply both counters by 0.5."""
+        to_remove = []
+        for speaker_id, counters in self._speaker_influence.items():
+            last_decay = counters[2]
+            if self.tick - last_decay >= 50:
+                counters[0] *= 0.5  # heard_count
+                counters[1] *= 0.5  # moved_count
+                counters[2] = self.tick
+                # Remove if both counters negligible
+                if counters[0] < 0.1 and counters[1] < 0.1:
+                    to_remove.append(speaker_id)
+        for sid in to_remove:
+            self._speaker_influence.pop(sid, None)
 
     # ----- Helpers -----
 
@@ -1064,7 +1332,16 @@ class Ocean:
 
         net_credits = lob.credits_earned - lob.credits_spent
 
-        return {
+        # Factored context (Phase 2)
+        fc = self._get_factored_context_for_agent(lob)
+
+        # Speaker influence score: moved/heard ratio for this agent as speaker
+        inf = self._speaker_influence.get(agent_id)
+        influence_score = 0.0
+        if inf and inf[0] > 0.5:  # need at least ~1 heard event (after decay)
+            influence_score = inf[1] / inf[0]
+
+        state_dict = {
             "tick": self.tick,
             "epoch": self.epoch_mgr.epoch,
             "epoch_ticks_remaining": self.epoch_mgr.ticks_remaining(),
@@ -1089,7 +1366,13 @@ class Ocean:
             "my_colony": in_colony,
             "my_colony_id": my_colony_id,
             "tidal": self.tidal.get_state_for_agent(),
+            "factored_context": fc,
+            "is_novel_context": fc in self._novelty_holdout_set if fc is not None else False,
+            "task_stimuli": self._current_stimuli,
+            "influence_score": round(influence_score, 3),
         }
+
+        return state_dict
 
     # ----- Viewer state -----
 
@@ -1107,6 +1390,7 @@ class Ocean:
                 "net_credits": round(lob.credits_earned - lob.credits_spent, 2),
                 "grace": lob.grace_ticks > 0,
                 "colony": self.colony_mgr.get_colony_for(lob.id) is not None,
+                "role": lob.current_role,
             })
 
         rifts = []
@@ -1217,6 +1501,8 @@ class Ocean:
         self._cic_silent_events = 0
         self._cic_silent_moved = 0
         self._heard_from.clear()
+        self._cic_speaker_pending.clear()
+        # Note: _speaker_influence NOT cleared — uses sliding window decay across epochs
         self.cultural_cache = CulturalCache(self.config)
         self.pheromone_map = PheromoneMap(self.config)
         self.colony_mgr = ColonyManager(self.config)

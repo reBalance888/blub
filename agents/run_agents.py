@@ -22,12 +22,19 @@ from social_agent import SocialAgent
 
 
 def _load_config_sections() -> tuple[dict, dict]:
-    """Load ablation and language config from config.yaml."""
+    """Load ablation and language config from config.yaml.
+    Also injects bottleneck + specialization config into language_cfg for agents."""
     config_path = Path(__file__).parent.parent / "config.yaml"
     try:
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
-        return cfg.get("ablation", {}), cfg.get("language", {})
+        ablation = cfg.get("ablation", {})
+        language_cfg = cfg.get("language", {})
+        # Inject specialization config so agents can init TaskThresholds
+        spec = cfg.get("specialization", {})
+        if spec:
+            language_cfg["_specialization"] = spec
+        return ablation, language_cfg
     except Exception:
         return {}, {}
 

@@ -371,6 +371,63 @@ class MetricsLogger:
             if vals
         }
 
+    def compute_zero_shot_accuracy(self, novelty_set: set[tuple]) -> float:
+        """For novel contexts (held-out combos): check if message is compositionally correct.
+        Correct = same position-0 as other messages with same Feature 1 value,
+        AND same position-1 as other messages with same Feature 2 value.
+        Returns fraction correct out of novel encounters."""
+        if not novelty_set or not self.long_observations:
+            return 0.0
+
+        # Build feature→position mapping from NON-novel observations
+        # feature_val_to_sound[pos][feature_val] → most common sound at that position
+        pos0_map: dict[int, dict[int, int]] = {}  # sit → {sound: count}
+        pos1_map: dict[int, dict[int, int]] = {}  # tgt → {sound: count}
+
+        novel_encounters = []
+        for seq, ctx, _ in self.long_observations:
+            if len(seq) < 2 or len(ctx) < 3:
+                continue
+            fc = (ctx[0], ctx[1], ctx[2])  # factored context in first 3 dims
+            # Convert scaled values back to discrete indices
+            sit = round(fc[0] * 3.0 / 8.0) if fc[0] > 0 else 0
+            tgt = round(fc[1] * 4.0 / 8.0) if fc[1] > 0 else 0
+            urg = round(fc[2] * 2.0 / 8.0) if fc[2] > 0 else 0
+            fc_discrete = (sit, tgt, urg)
+
+            if fc_discrete in novelty_set:
+                novel_encounters.append((seq, fc_discrete))
+            else:
+                # Track training data for pos→feature mapping
+                s0 = seq[0] if isinstance(seq[0], int) else 0
+                s1 = seq[1] if isinstance(seq[1], int) else 0
+                if sit not in pos0_map:
+                    pos0_map[sit] = {}
+                pos0_map[sit][s0] = pos0_map[sit].get(s0, 0) + 1
+                if tgt not in pos1_map:
+                    pos1_map[tgt] = {}
+                pos1_map[tgt][s1] = pos1_map[tgt].get(s1, 0) + 1
+
+        if not novel_encounters or not pos0_map or not pos1_map:
+            return 0.0
+
+        # Expected sound per feature value
+        expected_pos0 = {sit: max(counts, key=counts.get) for sit, counts in pos0_map.items()}
+        expected_pos1 = {tgt: max(counts, key=counts.get) for tgt, counts in pos1_map.items()}
+
+        correct = 0
+        total = 0
+        for seq, (sit, tgt, urg) in novel_encounters:
+            s0 = seq[0] if isinstance(seq[0], int) else 0
+            s1 = seq[1] if isinstance(seq[1], int) else 0
+            p0_ok = expected_pos0.get(sit) == s0
+            p1_ok = expected_pos1.get(tgt) == s1
+            if p0_ok and p1_ok:
+                correct += 1
+            total += 1
+
+        return round(correct / total, 4) if total > 0 else 0.0
+
     def reset(self):
         self.observations.clear()
         self.long_observations.clear()

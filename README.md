@@ -1,202 +1,256 @@
-# BLUB Ocean
+<p align="center">
+  <!-- Replace with your actual screenshot/GIF path after adding to repo -->
+  <img src="docs/assets/ocean-preview.png" alt="BLUB Ocean — AI lobsters evolving language in a bioluminescent ocean" width="700">
+</p>
 
-> AI agents develop emergent language from 30 meaningless sounds. Coordination = money.
+<h1 align="center">🦞 BLUB Ocean</h1>
+
+<p align="center">
+  <strong>An eternal ocean where AI lobsters evolve language from scratch.</strong><br>
+  No hardcoded grammar. No neural networks. Just survival pressure and sound.
+</p>
+
+<p align="center">
+  <a href="#what-is-this">What is this</a> •
+  <a href="#why-it-matters">Why it matters</a> •
+  <a href="#live-metrics">Live metrics</a> •
+  <a href="#quickstart">Quickstart</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#roadmap">Roadmap</a> •
+  <a href="#contributing">Contributing</a>
+</p>
+
+---
 
 ## What is this
 
-BLUB Ocean is a 2D simulation where AI agents ("lobsters") inhabit an ocean floor dotted with resource rifts. Agents earn credits by farming rifts in groups — but the game is rigged: solo farming pays almost nothing, while a group of 5 earns 40x more per agent. The catch? Agents start with zero shared language.
+BLUB Ocean is a perpetual simulation where 33 AI agents (lobsters) develop an emergent language from 10 meaningless sounds. Language isn't programmed — it **evolves** because coordination pays. Lobsters who communicate better earn more credits at resource rifts. Those who can't communicate starve.
 
-Each agent can emit up to 5 sounds per tick from a vocabulary of 30 meaningless tokens (`blub`, `glorp`, `skree`, ...). Sounds cost credits to produce. Over hundreds of ticks, social agents independently discover that certain sounds correlate with certain situations — "near a gold rift", "predator approaching", "crowded area" — and begin using them consistently. Other agents observe these patterns and converge on shared meanings.
+**The core loop:**
+1. A lobster stands at a rift and sees a context (food? predator? which type? how urgent?)
+2. It produces a 2-sound message from 10 possible sounds (= 100 combinations)
+3. Other lobsters hear the message, observe the outcome, and update their beliefs
+4. Over hundreds of epochs, shared conventions emerge — a language is born
+5. The language is never finished. It drifts, mutates, and evolves forever.
 
-This is not programmed language. There are no built-in labels, no reward for "correct" communication, no teacher signal. Language emerges purely from the economic pressure to coordinate. The system measures this emergence with standard computational linguistics metrics: topographic similarity, positional disentanglement, and mutual information.
+This is **Proof of Communication** — language as mining.
 
-## How it works
+## Why it matters
 
-```
-    ┌─────────────────────────────────────────────────┐
-    │                  BLUB Ocean                      │
-    │                                                  │
-    │   Agent observes state (rifts, predators, etc.)  │
-    │          │                                       │
-    │          ▼                                       │
-    │   ContextDiscoverer bins 6 raw dims → key        │
-    │          │                                       │
-    │          ▼                                       │
-    │   ProductionPolicy (Roth-Erev) → emit sound      │
-    │          │                                       │
-    │          ▼                                       │
-    │   Other agents hear sound + observe context       │
-    │          │                                       │
-    │          ▼                                       │
-    │   Comprehension (Bayesian) updates P(ctx|sound)   │
-    │          │                                       │
-    │          ▼                                       │
-    │   Agents coordinate at rifts → earn credits       │
-    │          │                                       │
-    │          ▼                                       │
-    │   Credits reinforce the sound that was produced   │
-    │          │                                       │
-    │          └──────── loop ─────────────────────────┘
-    │                                                  │
-    │   Epoch end: credits → $BLUB proportional share   │
-    └─────────────────────────────────────────────────┘
-```
+Most AI language experiments use 2 agents in a vacuum for 1 paper. BLUB runs **33 agents** in a persistent ecosystem with predators, colonies, pheromone trails, day/night cycles, seasonal tides — and culture that passes from dying agents to newborns.
 
-## Quick Start
+The question we're asking: **Can economic pressure alone create language?** Not fine-tuned language. Not prompted language. Language that emerges the way human language did — from the need to survive together.
+
+**Five sacred design principles:**
+1. **Never hardcode roles, conventions, or language** — everything must emerge
+2. **No neural networks** — simple agents under pressure > complex agents without pressure
+3. **Multiple simultaneous pressures** — food + predator + social + economic
+4. **No global information** — if everyone sees everything, communication is useless
+5. **Never optimize one metric** — Goodhart's Law. We track a portfolio: TopSim, CSR, MI, CIC, ecological measures
+
+## Live metrics
+
+Building in public. These are real numbers from real runs, not cherry-picked.
+
+| Metric | What it measures | Current (epoch 824) | Target |
+|--------|-----------------|---------------------|--------|
+| **TopSim** | Compositionality (similar meanings → similar messages) | 0.03 | > 0.20 |
+| **CIC** | Causal influence (do messages actually change behavior?) | 0.003 | > 0.05 |
+| **CSR** | Context-sound correlation (consistency) | 0.19 | > 0.50 |
+| **PosDis** | Positional disentanglement (each sound position = different info) | 0.15 | > 0.30 |
+| **Vocab** | Unique messages actively used | 0 (collapsed) | > 30 |
+
+**Yes, these numbers are bad.** We found critical bugs — half the message was frozen (position 1 always produced the same sound). Fixes are being deployed. Follow the journey in [CHANGELOG.md](CHANGELOG.md).
+
+> *"The interesting thing about BLUB is not that it works — it's watching it learn to work."*
+
+## Quickstart
+
+### Prerequisites
+- Python 3.10+
+- Node.js 18+ (for the viewer)
+
+### Run the ocean
 
 ```bash
-# Install dependencies
-pip install fastapi uvicorn pyyaml aiohttp websockets
+# Clone
+git clone https://github.com/reBalance888/blub.git
+cd blub
 
-# One-click launch (20 agents, mixed types)
-bash start.sh 20 mix
+# Install server dependencies
+pip install -r requirements.txt
 
-# Or manually:
-# Terminal 1 — server
+# Start the ocean server
 python -m server.main
 
-# Terminal 2 — agents
-python agents/run_agents.py --count 20 --type mix
+# In another terminal — launch 33 lobsters
+python -u agents/run_agents.py --count 33 --type social
 
-# Terminal 3 — viewer
-open http://localhost:8000/viewer
+# In another terminal — start the viewer
+cd viewer && npm install && npm start
 ```
 
-Monitor:
-```bash
-tail -f server_log.txt          # Server activity
-tail -f agents_log.txt          # Agent decisions
-grep EPOCH server_log.txt       # Epoch summaries
-cat metrics_log.jsonl | tail -5 # Latest metrics
-```
+Open `http://localhost:3000` and watch the ocean.
 
-## Rift Types
+### Configuration
 
-Rifts come in three types with different economics:
+Everything is in `config.yaml` with kill switches for every feature:
 
-| Type   | Color  | Richness | Depletion | Spawn Weight |
-|--------|--------|----------|-----------|--------------|
-| Gold   | #ffd700 | 8,000   | 4%/tick   | 20%          |
-| Silver | #c0c0c0 | 5,000   | 2%/tick   | 50%          |
-| Copper | #cd7f32 | 2,000   | 1%/tick   | 30%          |
+```yaml
+language:
+  sounds: [blub, glorp, skree, klak, mrrp, woosh, pop, zzzub, frrr, tink]
+  message_length: 2
+  message_cost: 5
+  learning_rate: 0.03
+  cultural_cache_inheritance: 0.4  # dying agent → newborn gets 40% of knowledge
 
-Gold rifts are rare and rich but deplete fast — agents must coordinate quickly. Copper rifts are abundant and slow — good for sustained farming. This creates pressure for agents to develop distinct signals for rift quality.
+ecology:
+  predators:
+    shark: { speed: 1.7, lethality: 0.80, spawn_weight: 0.50 }
+    eel: { speed: 0, lethality: 0.60, spawn_weight: 0.35 }
+    octopus: { speed: 0.5, lethality: 0.50, spawn_weight: 0.15 }
 
-## Agent Types
-
-| Type     | Strategy | Speaks? | Expected Performance |
-|----------|----------|---------|---------------------|
-| Social   | Discovers contexts, builds language, coordinates groups | Yes | Highest after ~200 ticks |
-| Greedy   | Heads to nearest rift, no communication | No | Medium baseline |
-| Random   | Random movement and sounds | Random | Lowest baseline |
-
-Default mix: 50% social, 30% greedy, 20% random.
-
-## Language Metrics
-
-Computed every 100 ticks and logged to `metrics_log.jsonl`:
-
-| Metric | What it measures | Good value |
-|--------|-----------------|------------|
-| **TopSim** | Spearman correlation: similar meanings → similar signals | > 0.3 |
-| **PosDis** | Each sound position encodes a distinct context dimension | > 0.2 |
-| **MI** | Mutual information between signals and contexts | > 0.5 |
-| **Vocabulary** | Sounds used consistently (>60%) for one context | > 5 |
-| **Econ Delta** | Credit advantage of speakers over silent agents | > 0 |
-
-## Research Context
-
-This system demonstrates **emergent communication** in a multi-agent reinforcement learning setting, following the signaling game framework (Lewis, 1969). Key design choices:
-
-- **No teacher signal**: language emerges from economic pressure alone
-- **Adaptive contexts**: agents discover their own context categories (no hardcoded labels)
-- **Roth-Erev dynamics**: production policy uses reinforcement learning, not gradient descent
-- **Bayesian comprehension**: listeners track P(context | sound) independently
-- **Economic grounding**: communication has real cost (1 credit/sound) and real benefit (group coordination bonus)
-
-Related work: Lazaridou et al. (2017) "Multi-Agent Cooperation and the Emergence of (Natural) Language", Chaabouni et al. (2020) "Compositionality and Generalization in Emergent Languages".
-
-## Create Your Own Agent
-
-See [`skill/SKILL.md`](skill/SKILL.md) for the full guide. Minimal example:
-
-```python
-from base_agent import BlubAgent, SOUNDS
-
-class MyAgent(BlubAgent):
-    def think(self, state):
-        # state includes: nearby_rifts, nearby_lobsters,
-        # nearby_predators, sounds_heard, my_net_credits, ...
-        return {"move": "north", "speak": ["blub"], "act": None}
-
-    def on_sounds_heard(self, sounds):
-        # Build your language model here
-        for event in sounds:
-            print(f"{event['from']} said {event['sounds']}")
-```
-
-```bash
-cd agents && python -c "
-import asyncio
-from my_agent import MyAgent
-asyncio.run(MyAgent('my_bot', 'http://localhost:8000').run())
-"
+economy:
+  group_rewards: [0.5, 1.0, 1.8, 2.8, 4.0]  # solo → group of 5
+  colony_bonus: 1.5
 ```
 
 ## Architecture
 
 ```
-BLUB/
-├── server/              # Simulation server (FastAPI + WebSocket)
-│   ├── ocean.py         # Core world: grid, lobsters, ticks, rewards
-│   ├── rift.py          # Rifts: gold/silver/copper types, depletion
-│   ├── predator.py      # Predators: density-based spawning, hunting
-│   ├── economy.py       # Economy: balances, tiers, epoch rewards
-│   ├── epoch.py         # Epoch lifecycle management
-│   ├── metrics.py       # Language metrics: TopSim, PosDis, MI
-│   └── main.py          # FastAPI server on :8000
-│
-├── agents/              # Agent implementations
-│   ├── base_agent.py    # Base class — extend this
-│   ├── social_agent.py  # ContextDiscoverer + Roth-Erev production
-│   ├── greedy_agent.py  # Silent rift-seeker baseline
-│   ├── random_agent.py  # Random movement/sound baseline
-│   └── run_agents.py    # Launch N agents (mix/social/greedy/random)
-│
-├── viewer/              # Single-file React + Canvas visualization
-│   └── index.html       # Real-time ocean viewer with metrics panel
-│
-├── skill/               # Agent creation guide
-│   └── SKILL.md
-│
-├── config.yaml          # All simulation parameters
-├── start.sh             # One-click launcher
-└── metrics_log.jsonl    # Metrics output (generated at runtime)
+┌─────────────┐     WebSocket      ┌──────────────┐
+│   Viewer    │◄──────────────────►│    Server     │
+│  React 18   │                    │  FastAPI +    │
+│  Canvas 2D  │                    │  tick 0.1s    │
+└─────────────┘                    └──────┬───────┘
+                                          │
+                           ┌──────────────┼──────────────┐
+                           │              │              │
+                      ┌────▼───┐    ┌────▼───┐    ┌────▼───┐
+                      │Agent 1 │    │Agent 2 │    │ ... 33 │
+                      │asyncio │    │asyncio │    │asyncio │
+                      └────────┘    └────────┘    └────────┘
+
+Each agent: GaussianProductionPolicy (speaker) + Bayesian Listener (hearer)
+No shared weights. No central brain. Just 33 independent minds in one ocean.
 ```
 
-## API
+### How language emerges (technical)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/connect` | POST | Register agent, get `agent_id` |
-| `/action` | POST | Send `{move, speak, act}` |
-| `/state/{agent_id}` | GET | Agent's visible state |
-| `/ws/{agent_id}` | WS | Real-time state push |
-| `/ws/viewer` | WS | Viewer data stream |
-| `/stats` | GET | Leaderboard & world stats |
-| `/reset` | POST | Reset the simulation |
-| `/viewer` | GET | Serve the visualization |
+1. **Production**: `GaussianProductionPolicy` maps factored context (situation × target × urgency = 60 values) to a continuous μ ∈ [0,1], samples from Gaussian → sound index, one per message position
+2. **Comprehension**: Bayesian updating — `counts[sound][context] += 1` — builds hypotheses over hundreds of observations
+3. **Learning**: REINFORCE — if speaking led to credits, strengthen that context→sound mapping
+4. **Structure pressure**: Topographic bonus rewards smooth mappings (similar contexts → similar sounds)
+5. **Cultural transmission**: Dying agents deposit policy weights into a cultural cache. Newborns inherit 40% — knowledge survives death
 
-## Config
+### Ecology
 
-All parameters in `config.yaml`:
+The ocean isn't just a backdrop — it's an evolutionary pressure cooker:
 
-- `ocean.size` — grid dimensions (default 100x100)
-- `rifts.types` — gold/silver/copper richness and depletion rates
-- `economy.epoch_length_ticks` — 600 for testing, 3600 for production runs
-- `economy.simulated_epoch_pool` — BLUB distributed per epoch
-- `predators.grace_period` — immunity ticks after spawn/respawn
+- **3 predator types** with different hunting strategies (chase, ambush, pheromone tracking)
+- **4 pheromone layers** (food trails, danger zones, depletion markers, colony scent)
+- **3 nested time cycles** (day/night 50 ticks, tidal 200 ticks, seasonal 1000 ticks)
+- **Colony formation** via DBSCAN clustering — groups that stay together get 1.5× rewards
+- **Bottleneck pressure** — every 200 ticks, the lowest earner is replaced by a newborn with limited information access
+
+## Roadmap
+
+### ✅ Phase 2 — Foundation (current)
+- Factored context (situation × target × urgency)
+- 4 pheromone layers
+- Colony system with DBSCAN
+- Tidal engine (day/night, tides, seasons)
+- Bottleneck with cultural transmission
+
+### 🔧 Phase 2.5 — Bootstrap Language (in progress)
+- [ ] Fix position 1 context distribution (critical bug)
+- [ ] Causal influence intrinsic reward
+- [ ] Message entropy regularization
+- [ ] Population heterogeneity (variable learning rates)
+- [ ] Self-organized criticality (rift eruptions)
+- [ ] Colony memory (colony-level cultural cache)
+- [ ] Cultural Ratchet (expandable 2–4 sound messages)
+
+### 🗺️ Phase I — Babel Reef
+*Prerequisites: TopSim > 0.20, CSR > 0.50*
+- 4 biomes (reef, open water, trench, shallows) with exclusive resources
+- Cross-zone trade dependency → dialects emerge
+- Migration pressure through seasonal scarcity
+
+### 🔴 Phase II — Red Queen Protocol
+*Prerequisites: F_ST > 0.20, dialect diversity confirmed*
+- Tiered rifts (×3, ×10 rewards for coordinated protocols)
+- Protocol mutation every 200 epochs — keep adapting or die
+- Colony fission-fusion dynamics
+
+### 🏛️ Phase III — Rosetta Economy
+*Prerequisites: Tier 2 success > 30%, translator agents detected*
+- Information auctions
+- Reputation system
+- $BLUB token launch (Proof of Communication)
+- External agent API — bring your own lobster
+
+## The $BLUB token
+
+$BLUB will launch **after the language is proven real** (CIC > 0.05, TopSim > 0.15). Not before. We're not launching a memecoin — we're launching proof that economic pressure creates language.
+
+The token will be the metabolic energy of the ocean:
+- Epoch rewards funded by trading fees
+- Tiers (vision/hearing range) scale with holdings
+- Spawn crystals burn BLUB to create new agents
+- Fair launch on Base via BANKR — no presale, no VC
+
+More details in the [Tokenomics Design Doc](docs/tokenomics.md) (coming soon).
+
+## Project structure
+
+```
+blub/
+├── server/           # Ocean simulation server (FastAPI + WebSocket)
+│   ├── main.py       # Entry point
+│   └── ocean.py      # Core simulation loop
+├── agents/           # AI agent implementations
+│   ├── social_agent.py   # Main agent: Gaussian speaker + Bayesian listener
+│   └── run_agents.py     # Agent launcher
+├── viewer/           # React 18 + Canvas 2D bioluminescent viewer
+├── config.yaml       # All parameters with kill switches
+├── metrics_log.jsonl # Raw metrics per epoch
+└── docs/
+    ├── assets/       # Screenshots, GIFs
+    ├── design.md     # Design decisions and sacred principles
+    └── metrics.md    # How we measure language emergence
+```
+
+## Research context
+
+BLUB builds on decades of work in emergent communication and language evolution:
+
+- **Signaling games**: Lewis (1969), Skyrms (2010) — how conventions emerge from coordination
+- **Iterated Learning**: Kirby et al. (2008) — cultural transmission creates compositionality
+- **Emergent communication in MARL**: Lazaridou (2017), Foerster (2016), Chaabouni (2020)
+- **Virtual economies**: EVE Online (20+ years of balanced sink/faucet design)
+- **Complex adaptive systems**: Kauffman NK models, Bak sandpile (self-organized criticality)
+
+What makes BLUB different: most experiments use 2 agents in a static environment for one paper. BLUB is **33 agents, persistent ecology, cultural transmission, and economic pressure** — all running simultaneously, forever.
+
+## Contributing
+
+BLUB is a solo project right now, but contributions are welcome:
+
+- **Watch the metrics** — follow along, spot patterns I miss
+- **Suggest experiments** — what parameters should we try?
+- **Improve the viewer** — make the ocean more beautiful / informative
+- **Write analysis tools** — better ways to visualize language emergence
+- **Research connections** — know a relevant paper? Open an issue
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  <em>Language wasn't designed. It evolved.<br>Can we watch it happen again?</em>
+</p>

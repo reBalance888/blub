@@ -191,6 +191,10 @@ class GaussianProductionPolicy:
         self.sigma_min = lang.get("sigma_min", 0.5)
         self.sigma_anneal = lang.get("sigma_anneal_per_epoch", 0.02)
         self.weight_decay = lang.get("weight_decay", 0.9995)
+        # Entropy regularization: rolling buffer of recent messages
+        self._recent_messages: list[tuple] = []
+        self._entropy_bonus_coeff: float = lang.get("entropy_bonus_coeff", 1.0)
+        self._entropy_min_threshold: float = lang.get("entropy_min_threshold", 1.0)
         # Structured init: W @ normalized_ctx → sigmoid → [0,1] → sound index.
         # Position 0: high spatial → HIGH sounds (positive gradient)
         # Position 1: high social → LOW sounds (flipped gradient)
@@ -247,16 +251,41 @@ class GaussianProductionPolicy:
                     chosen = i
                     break
             message.append(chosen)
+        # Track message for entropy regularization
+        self._recent_messages.append(tuple(message))
+        if len(self._recent_messages) > 50:
+            self._recent_messages.pop(0)
         return message
+
+    def _message_entropy(self) -> float:
+        """Compute entropy H over recent message buffer in bits."""
+        if len(self._recent_messages) < 10:
+            return 0.0
+        counts: dict[tuple, int] = {}
+        for m in self._recent_messages:
+            counts[m] = counts.get(m, 0) + 1
+        n = len(self._recent_messages)
+        h = 0.0
+        for c in counts.values():
+            p = c / n
+            if p > 0:
+                h -= p * math.log2(p)
+        return h
 
     def reinforce(self, full_ctx: tuple, message: list[int], rewards: list[float]):
         """REINFORCE for Gaussian policy.
-        Gradient: push μ toward chosen sound if advantage > 0."""
+        Gradient: push μ toward chosen sound if advantage > 0.
+        Entropy regularization: gentle bonus/penalty to prevent message collapse."""
+        # Entropy adjustment (shared across positions)
+        h = self._message_entropy()
+        entropy_adj = self._entropy_bonus_coeff * (h - self._entropy_min_threshold)
+        entropy_adj = max(-1.0, min(1.0, entropy_adj))  # cap at +/-1.0
+
         sub_ctxs = self.split_context(full_ctx)
         for pos in range(min(len(message), self.max_len)):
             reward = rewards[pos] if pos < len(rewards) else rewards[-1]
             self.baseline[pos] += 0.01 * (reward - self.baseline[pos])
-            advantage = reward - self.baseline[pos]
+            advantage = reward - self.baseline[pos] + entropy_adj
             if abs(advantage) < 0.01:
                 continue
 
@@ -372,18 +401,62 @@ class Comprehension:
         return False
 
 
+class TaskThresholds:
+    """Bonabeau response threshold model for emergent role specialization.
+    4 task types: FORAGE=0, SCOUT=1, GUARD=2, TEACH=3.
+    P(respond) = s^2 / (s^2 + theta^2). Performing lowers threshold, skipping raises it."""
+
+    TASK_NAMES = ["forage", "scout", "guard", "teach"]
+
+    def __init__(self, config: dict | None = None):
+        cfg = config or {}
+        init_t = cfg.get("initial_threshold", 5.0)
+        noise = cfg.get("initial_noise", 0.1)
+        self.thresholds = [init_t + random.gauss(0, noise) for _ in range(4)]
+        self.decrease = cfg.get("threshold_decrease", 0.05)
+        self.increase = cfg.get("threshold_increase", 0.01)
+        self.t_min = cfg.get("threshold_min", 0.1)
+        self.t_max = cfg.get("threshold_max", 10.0)
+
+    def respond_probability(self, task_index: int, stimulus: float) -> float:
+        s = stimulus
+        theta = self.thresholds[task_index]
+        denom = s * s + theta * theta
+        return (s * s) / denom if denom > 0 else 0.0
+
+    def update(self, performed_task_index: int):
+        for i in range(4):
+            if i == performed_task_index:
+                self.thresholds[i] = max(self.t_min, self.thresholds[i] - self.decrease)
+            else:
+                self.thresholds[i] = min(self.t_max, self.thresholds[i] + self.increase)
+
+    def select_task(self, stimuli: list[float]) -> int | None:
+        probs = [self.respond_probability(i, stimuli[i]) for i in range(4)]
+        total = sum(probs)
+        if total < 0.01:
+            return None
+        r = random.random() * total
+        cumulative = 0.0
+        for i, p in enumerate(probs):
+            cumulative += p
+            if r <= cumulative:
+                return i
+        return 3
+
+    def get_dominant_role(self) -> int:
+        """Return task index with lowest threshold (most specialized toward)."""
+        return min(range(4), key=lambda i: self.thresholds[i])
+
+
 class SocialAgent(BlubAgent):
     """
     Discovers contexts from raw state, produces sounds via Roth-Erev policy,
     comprehends heard sounds via Bayesian updating.
 
-    6 context dimensions:
-      0: distance to nearest rift (Manhattan)
-      1: richness_pct of nearest rift
-      2: rift_type of nearest rift (gold=3, silver=2, copper=1, none=0)
-      3: nearby lobster count
-      4: nearby predator count
-      5: heading to nearest rift (0-7 compass, 8=none)
+    Context modes:
+      - "legacy": 6D continuous vector (distance, richness, type, lobsters, predators, heading)
+      - "factored": 3-feature discrete (situation_type, target_detail, urgency)
     """
 
     def __init__(self, *args, ablation: dict | None = None,
@@ -391,9 +464,14 @@ class SocialAgent(BlubAgent):
         super().__init__(*args, **kwargs)
         self.ablation = ablation or {}
         self.language_cfg = language_cfg or {}
+        self._context_mode = self.language_cfg.get("context_mode", "legacy")
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
+        # Population heterogeneity: vary lr by agent identity for diversity
+        base_lr = self.language_cfg.get("learning_rate", 0.03)
+        rng = random.Random(hash(self.name))
+        agent_lr = base_lr * rng.uniform(0.7, 1.4)
         self.production = GaussianProductionPolicy(
-            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03,
+            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=agent_lr,
             language_cfg=self.language_cfg,
         )
         self.comprehension = Comprehension()
@@ -406,11 +484,23 @@ class SocialAgent(BlubAgent):
         self.decay_counter: int = 0
         self.last_epoch: int = -1  # for epoch-change detection (sigma annealing)
         self.topo_bonus_scale: float = self.language_cfg.get("topo_bonus_scale", 4.0)
+        # Causal influence reward coefficient
+        self._causal_influence_coeff: float = self.language_cfg.get("causal_influence_coeff", 3.0)
         # Topographic tracking: recent (message_tuple, ctx_key) pairs
         self._msg_history: list[tuple[tuple, tuple]] = []
         # Predator mosaic: eel memory and octopus pheromone suppression
         self._eel_memory: list[tuple[int, int, int]] = []  # (x, y, expiry_tick), max 5
         self._pheromone_suppress_until: int = 0
+        # Phase 2: Bottleneck — observation filter for newborns
+        self._observation_rate: float = kwargs.get("observation_rate", 1.0)
+        self._learning_period_end: int = kwargs.get("learning_period", 0)
+        self._is_in_learning_period: bool = self._observation_rate < 1.0
+        # Phase 2: Specialization — task thresholds
+        spec_cfg = self.language_cfg.get("_specialization", {})
+        self._task_thresholds: TaskThresholds | None = None
+        if spec_cfg.get("enabled", False):
+            self._task_thresholds = TaskThresholds(spec_cfg)
+        self._current_task: int | None = None
 
     @staticmethod
     def _heading(relative: list[int]) -> int:
@@ -571,13 +661,26 @@ class SocialAgent(BlubAgent):
         pass
 
     def on_sounds_heard(self, sounds_events: list):
-        """Update comprehension when sounds are received (individual + sequences)."""
+        """Update comprehension when sounds are received (individual + sequences).
+        Phase 2 bottleneck: newborns filter out messages during learning period."""
         if not self.ablation.get("bayesian", True):
             return  # ablation: skip Bayesian comprehension
-        raw = self._extract_raw(self.state)
-        ctx_key = self.ctx_discoverer.get_context(raw)
+
+        # Factored or legacy context for comprehension
+        fc = self.state.get("factored_context") if self.state else None
+        if fc is not None and self._context_mode == "factored":
+            ctx_key = self._factored_to_ctx_key(fc)
+        else:
+            raw = self._extract_raw(self.state)
+            ctx_key = self.ctx_discoverer.get_context(raw)
+
+        current_tick = self.state.get("tick", 0) if self.state else 0
 
         for event in sounds_events:
+            # Phase 2 bottleneck: during learning period, randomly skip messages
+            if self._is_in_learning_period and current_tick < self._learning_period_end:
+                if random.random() > self._observation_rate:
+                    continue  # message ignored — not added to Bayesian table
             seq_indices = []
             for sound_name in event["sounds"]:
                 if sound_name in SOUNDS:
@@ -588,10 +691,34 @@ class SocialAgent(BlubAgent):
             if len(seq_indices) >= 2:
                 self.comprehension.update_sequence(tuple(seq_indices), ctx_key)
 
+    def _factored_to_ctx_key(self, fc: tuple[int, int, int]) -> tuple:
+        """Convert factored (situation, target, urgency) to 6D context key for production.
+        Scale features so _normalize (÷ MAX_NORM=8) maps them to ~[0, 1]:
+        situation: 0-3 → *2.67 → 0-8, target: 0-4 → *2 → 0-8, urgency: 0-2 → *4 → 0-8.
+        Orthogonal split across positions for maximum PosDis:
+          pos0: (situation, urgency, 0) — WHAT happened + HOW URGENT
+          pos1: (target, 0, 0) — WHAT specifically (rift type, predator, etc.)"""
+        sit_scaled = fc[0] * (8.0 / 3.0)   # 0, 2.67, 5.33, 8.0
+        tgt_scaled = fc[1] * (8.0 / 4.0)   # 0, 2, 4, 6, 8
+        urg_scaled = fc[2] * (8.0 / 2.0)   # 0, 4, 8
+        return (sit_scaled, urg_scaled, 0, tgt_scaled, 0, 0)
+
     def think(self, state: dict) -> dict:
-        # Extract context
-        raw = self._extract_raw(state)
-        ctx_key = self.ctx_discoverer.get_context(raw)
+        # Extract context — factored mode or legacy
+        fc = state.get("factored_context")
+        if fc is not None and self._context_mode == "factored":
+            ctx_key = self._factored_to_ctx_key(fc)
+        else:
+            raw = self._extract_raw(state)
+            ctx_key = self.ctx_discoverer.get_context(raw)
+
+        # Phase 2: Task selection (specialization)
+        if self._task_thresholds is not None:
+            stimuli = state.get("task_stimuli", [1.0, 1.0, 1.0, 1.0])
+            selected = self._task_thresholds.select_task(stimuli)
+            if selected is not None:
+                self._task_thresholds.update(selected)
+            self._current_task = selected
 
         # Differential reinforcement: pos0=spatial (credit delta), pos1=social (group/survival)
         current_credits = state.get("my_net_credits", 0)
@@ -611,6 +738,30 @@ class SocialAgent(BlubAgent):
                 pos1_reward += 3.0  # surviving near predator rewards social encoding
             if current_deaths > self.last_deaths:
                 pos1_reward = -2.0  # died = negative social signal
+
+            # Phase 2: task-specific REINFORCE modulation (multiplicative 1.2/0.9)
+            if self._current_task is not None:
+                near_rift_now = bool(state.get("nearby_rifts"))
+                if self._current_task == 0:  # FORAGE
+                    mult = 1.2 if near_rift_now else 0.9
+                elif self._current_task == 1:  # SCOUT
+                    mult = 1.2 if delta > 0 and not near_rift_now else 0.9
+                elif self._current_task == 2:  # GUARD
+                    mult = 1.2 if survived_predator else 0.9
+                elif self._current_task == 3:  # TEACH
+                    mult = 1.2 if self._is_in_learning_period else 0.9
+                else:
+                    mult = 1.0
+                pos0_reward *= mult
+                pos1_reward *= mult
+
+            # Causal influence intrinsic reward: reward speaker whose listeners moved toward rifts
+            influence_score = state.get("influence_score", 0.0)
+            if influence_score > 0:
+                influence_reward = influence_score * self._causal_influence_coeff
+                pos0_reward += influence_reward
+                pos1_reward += influence_reward
+
             # Always reinforce when we spoke — agent must learn from both
             # positive (near rift) AND negative (open water) outcomes
             self.production.reinforce(
@@ -646,10 +797,12 @@ class SocialAgent(BlubAgent):
 
         # Produce sounds based on current context
         # Always speak near rifts/predators, 10% elsewhere (was 30% — too much noise)
+        # TEACH task: speak more frequently (20% baseline)
         near_rift = bool(state.get("nearby_rifts"))
         near_predator = bool(state.get("nearby_predators"))
+        base_speak_rate = 0.20 if self._current_task == 3 else 0.10
 
-        if near_rift or near_predator or random.random() < 0.10:
+        if near_rift or near_predator or random.random() < base_speak_rate:
             # Compositional production: always 2-sound message
             sound_indices = self.production.produce(ctx_key)
             speak = [SOUNDS[i] for i in sound_indices]
@@ -677,6 +830,11 @@ class SocialAgent(BlubAgent):
         for ne in state.get("nearby_noentry_trails", []):
             key = (ne["dx"], ne["dy"])
             noentry_map[key] = max(noentry_map.get(key, 0), ne["intensity"])
+
+        # Phase 2: compute role string for viewer
+        _role_name = ""
+        if self._task_thresholds is not None:
+            _role_name = TaskThresholds.TASK_NAMES[self._task_thresholds.get_dominant_role()]
 
         # Movement priority:
         # 1. Flee predators
@@ -733,7 +891,7 @@ class SocialAgent(BlubAgent):
                 # Unknown type: direct flee
                 move = "west" if dx > 0 else "east" if dx < 0 else "north" if dy > 0 else "south"
 
-            return {"move": move, "speak": speak, "act": None}
+            return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
         # Priority 2: heard sounds that mean "near rift" — go toward the speaker
         for event in state.get("sounds_heard", []):
@@ -759,7 +917,7 @@ class SocialAgent(BlubAgent):
                             move = "north"
                         else:
                             move = "stay"
-                        return {"move": move, "speak": speak, "act": None}
+                        return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
         # Priority 3: move toward nearest rift — filter out rifts with strong no-entry
         rifts = state.get("nearby_rifts", [])
@@ -798,13 +956,15 @@ class SocialAgent(BlubAgent):
                     move = "north"
                 else:
                     move = "stay"
-                return {"move": move, "speak": speak, "act": None}
+                return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
         # Priority 4: follow food pheromone gradient — dampen by no-entry
         # Skip food trail following while octopus pheromone suppression active
-        noentry_penalty_mult = 2.0  # TODO: move to state if tuning needed
+        # SCOUT task: skip food trails 50% of the time to explore
+        noentry_penalty_mult = 2.0
         current_tick_p4 = state.get("tick", 0)
-        food_trails = state.get("nearby_food_trails", []) if current_tick_p4 >= self._pheromone_suppress_until else []
+        skip_food = current_tick_p4 < self._pheromone_suppress_until or self._should_skip_food_trail()
+        food_trails = state.get("nearby_food_trails", []) if not skip_food else []
         if food_trails:
             best_food = None
             best_effective = -999.0
@@ -820,7 +980,7 @@ class SocialAgent(BlubAgent):
                     move = "east" if dx > 0 else "west"
                 else:
                     move = "south" if dy > 0 else "north"
-                return {"move": move, "speak": speak, "act": None}
+                return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
         # Priority 5: follow same-colony scent (homing to territory)
         colony_scent = state.get("nearby_colony_scent", [])
@@ -834,7 +994,7 @@ class SocialAgent(BlubAgent):
                     move = "east" if dx > 0 else "west"
                 else:
                     move = "south" if dy > 0 else "north"
-                return {"move": move, "speak": speak, "act": None}
+                return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
         # Priority 6: avoid danger pheromone zones
         danger = state.get("nearby_danger_trails", [])
@@ -846,7 +1006,7 @@ class SocialAgent(BlubAgent):
                 move = "west" if dx > 0 else "east"
             else:
                 move = "north" if dy > 0 else "south"
-            return {"move": move, "speak": speak, "act": None}
+            return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
         # Priority 7: avoid other-colony scent (territory respect)
         other_colony = [c for c in colony_scent
@@ -860,12 +1020,16 @@ class SocialAgent(BlubAgent):
                     move = "west" if dx > 0 else "east"
                 else:
                     move = "north" if dy > 0 else "south"
-                return {"move": move, "speak": speak, "act": None}
+                return {"move": move, "speak": speak, "act": None, "role": _role_name}
 
-        # Priority 8: random walk
+        # Priority 8: random walk (SCOUT task: bypass food trail following more often)
         move = random.choice(["north", "south", "east", "west"])
 
-        return {"move": move, "speak": speak, "act": None}
+        return {"move": move, "speak": speak, "act": None, "role": _role_name}
+
+    def _should_skip_food_trail(self) -> bool:
+        """SCOUT agents skip food trail following 50% of the time to explore more."""
+        return self._current_task == 1 and random.random() < 0.5
 
     def _topographic_bonus(self, ctx_key: tuple, sound_indices: list[int]) -> float:
         """Reward for topographic consistency: close contexts → close sounds.
@@ -900,11 +1064,26 @@ class SocialAgent(BlubAgent):
             n += 1
         return bonus / max(n, 1)
 
+    def get_specialization_info(self) -> dict | None:
+        """Return threshold info for metrics/viewer."""
+        if self._task_thresholds is None:
+            return None
+        return {
+            "thresholds": list(self._task_thresholds.thresholds),
+            "current_task": self._current_task,
+            "dominant_role": self._task_thresholds.get_dominant_role(),
+            "task_names": TaskThresholds.TASK_NAMES,
+        }
+
     def reset_language(self):
         """Reset all learned language state (for turnover/rebirth as naive)."""
         self.ctx_discoverer = ContextDiscoverer(dims=6, bins=4, warmup=50)
+        # Preserve agent-specific lr from population heterogeneity
+        base_lr = self.language_cfg.get("learning_rate", 0.03)
+        rng = random.Random(hash(self.name))
+        agent_lr = base_lr * rng.uniform(0.7, 1.4)
         self.production = GaussianProductionPolicy(
-            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=0.03,
+            n_sounds=len(SOUNDS), n_dims=3, max_len=2, lr=agent_lr,
             language_cfg=self.language_cfg,
         )
         self.comprehension = Comprehension()
@@ -918,6 +1097,8 @@ class SocialAgent(BlubAgent):
         self.last_epoch = -1
         self._eel_memory = []
         self._pheromone_suppress_until = 0
+        self._current_task = None
+        # Preserve _context_mode, _observation_rate, _task_thresholds across reset
         print(f"[{self.name}] Language state RESET (turnover rebirth)")
 
 
