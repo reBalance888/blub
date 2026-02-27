@@ -46,14 +46,16 @@ class Ocean:
 
     def __init__(self, config: dict):
         self.config = config
-        self.size: int = config["ocean"]["size"]
         self.tick_interval: float = config["ocean"]["tick_interval"]
         self.sounds: list[str] = config["sounds"]
 
-        # Active zone parameters
+        # Active zone parameters — ocean expands dynamically with agent count
         self.density_constant: float = config["ocean"].get("density_constant", 7)
         self.active_zone_min: int = config["ocean"].get("active_zone_min", 15)
         self.active_zone_size: int = self.active_zone_min
+        # size is dynamic: active_zone + margins, starts at minimum
+        margin = max(10, self.active_zone_min // 5)
+        self.size: int = self.active_zone_min + margin * 2
 
         self.tick: int = 0
         self.lobsters: dict[str, Lobster] = {}
@@ -114,21 +116,25 @@ class Ocean:
     # ----- Active zone -----
 
     def _recalculate_active_zone(self):
-        """Recalculate active zone size based on connected agent count."""
+        """Recalculate active zone size based on connected agent count.
+        Ocean expands dynamically — no hard cap. More agents = bigger world."""
         n = len(self.lobsters)
         if n == 0:
             self.active_zone_size = self.active_zone_min
         else:
-            raw = int(math.sqrt(n) * self.density_constant)
-            self.active_zone_size = max(self.active_zone_min, min(self.size, raw))
+            self.active_zone_size = max(self.active_zone_min,
+                                        int(math.sqrt(n) * self.density_constant))
+        # Ocean size grows with zone (zone + margin for predator spawns)
+        margin = max(10, self.active_zone_size // 5)
+        self.size = self.active_zone_size + margin * 2
         # Keep rift manager in sync
         zone_min, _ = self._active_zone_bounds()
         self.rift_mgr.update_zone(zone_min, self.active_zone_size)
 
     def _active_zone_bounds(self) -> tuple[int, int]:
         """Return (zone_min, zone_max) — active zone centered on the map."""
-        offset = (self.size - self.active_zone_size) // 2
-        return offset, offset + self.active_zone_size - 1
+        margin = max(10, self.active_zone_size // 5)
+        return margin, margin + self.active_zone_size - 1
 
     def _random_pos_in_zone(self) -> tuple[int, int]:
         """Random position within the active zone."""
