@@ -127,7 +127,7 @@ pheromones:
   other_colony_weight: 0.3             # distrust foreign food trails
 
 colonies:
-  formation_threshold: 4    # min agents to form
+  formation_threshold: 4    # ON — visual colonies, cache OFF
   formation_radius: 3       # max distance between members
   persistence_ticks: 30     # ticks as candidate before promotion
   reward_bonus: 1.5         # 50% rift reward bonus for members
@@ -175,7 +175,7 @@ bottleneck:
   retire_lowest_earning: true       # retire by credits (false = retire oldest)
 
 specialization:
-  enabled: true
+  enabled: false                   # DISABLED for A/B test vs baseline v1
   initial_threshold: 5.0
   initial_noise: 0.1
   threshold_decrease: 0.05          # on task performance
@@ -198,18 +198,18 @@ specialization:
       stimulus_scale: 5.0
 
 tidal:
-  enabled: true                    # kill switch for A/B testing
+  enabled: true                    # ON — night hearing fixed to 0.8
   day_night_period: 50             # ticks per full day/night cycle
   day_night_predator_max: 2.0      # night predator spawn multiplier
-  day_night_sound_min: 0.4         # night sound range multiplier
+  day_night_sound_min: 0.8         # night sound range multiplier (was 0.4 — killed CIC)
   tidal_period: 200                # ticks per tidal cycle
   tidal_offset_max: 2              # max rift offset cells at respawn
   seasonal_period: 1000            # ticks per seasonal cycle
   seasonal_min_multiplier: 0.5     # winter richness multiplier
 
 eruptions:
-  enabled: true
-  pressure_per_tick: 0.01
+  enabled: true                    # ON — pressure tuned to ~1-2/epoch
+  pressure_per_tick: 0.006
   pressure_per_agent: 0.2
   threshold_gold: 1.5
   threshold_silver: 1.0
@@ -221,12 +221,12 @@ eruptions:
   cascade_radius: 10
   cascade_chance: 0.30
   cascade_pressure_boost: 0.5
-  predator_attract_delay: 10
+  predator_attract_delay: 20
   predator_attract_radius: 8
   richness_restore_frac: 0.5
 
 colony_cache:
-  enabled: true
+  enabled: false                   # OFF — cache averaging hurts TopSim
   global_deposit_weight: 0.30
   colony_inherit_frac: 0.60
   global_inherit_frac: 0.40
@@ -234,7 +234,7 @@ colony_cache:
   cache_decay_rate: 0.98
 
 auto_balance:
-  enabled: true
+  enabled: false                   # DISABLED for A/B test vs baseline v1
   coordination_threshold: 0.2
   rift_radius_boost: 1.1
   predator_rate_reduction: 0.8

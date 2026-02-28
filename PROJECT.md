@@ -286,21 +286,60 @@ CSR           |  0.37    |  0.36     | stable
 vocab         |  49      |  50       | stable
 ```
 
+### Phase 7.0 — Level 2 Integration + Metrics Fixes (2026-02-28)
+
+**New systems added:** eruptions, colonies (DBSCAN), colony cache, tidal engine, task specialization, auto-balance (config only).
+
+**Bugs found and fixed:**
+1. `eruption_count` reset in `_end_epoch()` before metrics logging — always read as 0. Fix: moved reset to after metrics compute.
+2. CSR/PCA/CIC counters **never reset** after metrics logging — all metrics were cumulative, not per-epoch. Fix: reset after compute().
+3. Dead code in colony.py `_promote_candidates` (unreachable elif).
+
+**A/B Test Results (100 epochs each, 33 social agents):**
+
+```
+Run               | TopSim avg(80+) | TopSim peak | CSR    | CIC
+------------------+-----------------+-------------+--------+--------
+All Level 2 OFF   |   0.077         |   0.097     | 0.376  | 0.0071
+A: eruptions ON   |   0.079         |   0.156     | 0.389  | 0.0034
+B: colonies ON    |   0.067         |   0.106     | 0.375  | 0.0034
+C: tidal ON       |   0.071         |   0.105     | 0.330  | -0.003
+
+Impact on TopSim avg(80+) vs baseline 0.077:
+  Eruptions: +0.002 (neutral)
+  Colonies:  -0.010 (HURTS — colony homing reduces context diversity)
+  Tidal:     -0.006 (neutral, but kills CIC — night 0.4x sound range breaks links)
+```
+
+**Note:** Baseline v1 TopSim 0.103 used cumulative CSR/CIC (bug). New per-epoch metrics make direct comparison imprecise. New baseline established at 0.077 with correct metrics.
+
+### Current Targets (post-Phase 7.0)
+
+| Metric | New Baseline | Target |
+|--------|-------------|--------|
+| TopSim | 0.077 | >0.12 sustained |
+| CSR | 0.376 | >0.50 |
+| CIC | 0.007 | >0.02 |
+| social_MI | 2.9 | >2.5 (already met) |
+| Vocab | 42 | >30 (already met) |
+
 ### All-Time Best Metrics
 
 | Metric | Best Value | When |
 |--------|-----------|------|
 | TopSim | 0.199 | Phase 6.2, epoch 3 (small sample effect) |
-| TopSim (sustained) | 0.103 avg | Phase 6.2, epochs 91-110 |
+| TopSim (sustained) | 0.103 avg | Phase 6.2, epochs 91-110 (cumulative CSR era) |
+| TopSim (correct metrics) | 0.077 avg | Phase 7.0, all Level 2 OFF |
 | social_MI | 3.88 | Phase 6.0, epoch 20 |
 | vocab_argmax | 93 | Phase 6.0, epoch 95 |
-| CSR | 0.49 | Phase 6.2, epoch 1-10 (ramp-up) |
+| CSR (per-epoch) | 0.409 | Phase 7.0, Level 2 tuned, last 50 epochs |
 
 ### Known Issues
 
 1. **MI degrades 3.5→1.0 over 200 epochs** — global MI measurement includes generational drift. social_MI stays 2.9-3.3 (agents communicate fine). May be measurement artifact rather than real degradation.
-2. **CIC drops 0.04→0.005** — causal influence weakens over time. Agents respond to sounds but behavioral delta shrinks as they learn to also use pheromones/vision.
-3. **TopSim plateaus ~0.08** after peak — compositional structure emerges but doesn't deepen indefinitely. May need structural pressure (referential games, explicit compositionality reward).
+2. **Colonies hurt TopSim** — colony homing + territory avoidance reduce movement diversity, narrowing the contexts agents encounter. Need to either tune colony parameters or accept the tradeoff (colonies boost CSR via group coordination).
+3. **Tidal kills CIC** — night sound range 0.4x breaks communication links. Agents can't hear each other half the time. Consider raising `day_night_sound_min` from 0.4 to 0.7.
+4. **TopSim plateaus ~0.08** — compositional structure emerges but doesn't deepen indefinitely. May need structural pressure (referential games, explicit compositionality reward).
 
 ---
 
