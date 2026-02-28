@@ -320,6 +320,31 @@ class PredatorManager:
                 pred.x = max(0, min(ocean_size - 1, pred.x))
                 pred.y = max(0, min(ocean_size - 1, pred.y))
 
+    def spawn_at(self, ptype: str, x: int, y: int, ocean_size: int) -> Predator | None:
+        """Spawn a predator of the given type at absolute coordinates."""
+        tcfg = self.type_configs.get(ptype, {})
+        if not tcfg:
+            ptype = self._select_type()
+            tcfg = self.type_configs.get(ptype, {})
+        lifetime = tcfg.get("lifetime", self.config["predators"]["lifetime"])
+        speed = tcfg.get("speed", self.config["predators"]["speed"])
+        lethality = tcfg.get("lethality", self.config["predators"].get("kill_prob_base", 0.8))
+        respawn_delay = tcfg.get("respawn_delay", 10)
+
+        px = max(0, min(ocean_size - 1, x))
+        py = max(0, min(ocean_size - 1, y))
+
+        pid = f"pred_{self.next_pred_id}"
+        self.next_pred_id += 1
+        pred = Predator(
+            id=pid, x=float(px), y=float(py),
+            lifetime_remaining=lifetime,
+            predator_type=ptype, speed=speed, lethality=lethality,
+            respawn_delay=respawn_delay,
+        )
+        self.active_predators.append(pred)
+        return pred
+
     def get_counts_by_type(self) -> dict[str, int]:
         """Return count of active predators by type."""
         counts: dict[str, int] = {}

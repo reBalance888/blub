@@ -68,8 +68,8 @@ economy:
   total_supply: 1000000000
   epoch_length_ticks: 100
   simulated_epoch_pool: 500000
-  sound_credit_cost: 2
-  sound_cost_2: 5
+  sound_credit_cost: 0.5
+  sound_cost_2: 1
   death_timeout: 20
   death_credit_penalty: 0.05
   starting_balance: 50000
@@ -137,20 +137,21 @@ ablation:
   turnover: true       # agent retirement/replacement
   sound_cost: true     # credits deducted for speaking
   bayesian: true       # Bayesian comprehension in social agents
-  inheritance_frac: 0.40  # how much to blend imported knowledge
+  inheritance_frac: 0.60  # how much to blend imported knowledge
 
 cultural_cache:
-  inheritance_frac: 0.40
+  inheritance_frac: 0.60
   cache_decay_rate: 0.98
   min_agent_age_to_contribute: 300
   contribution_interval: 200
   noise_std: 0.10
-  partial_reset_retention: 0.20
+  partial_reset_retention: 0.50
 
 language:
-  sigma_start: 1.0
-  sigma_min: 0.7
-  sigma_anneal_per_epoch: 0.02
+  sigma_start: 1.5
+  sigma_newborn: 1.0
+  sigma_min: 0.5
+  sigma_anneal_per_epoch: 0.20
   topo_bonus_scale: 4.0
   weight_decay: 0.9995
   learning_rate: 0.03               # base lr (varied per-agent by 0.7-1.4x)
@@ -167,7 +168,7 @@ language:
 
 bottleneck:
   enabled: true
-  retirement_interval: 200          # ticks between forced retirements
+  retirement_interval: 500          # ticks between forced retirements (5 epochs, was 2)
   observation_rate: 0.35            # newborn processes 35% of heard messages
   learning_period: 300              # ticks of filtered observation
   min_agents_for_retirement: 25     # don't retire if population too low
@@ -205,6 +206,32 @@ tidal:
   tidal_offset_max: 2              # max rift offset cells at respawn
   seasonal_period: 1000            # ticks per seasonal cycle
   seasonal_min_multiplier: 0.5     # winter richness multiplier
+
+eruptions:
+  enabled: true
+  pressure_per_tick: 0.01
+  pressure_per_agent: 0.2
+  threshold_gold: 1.5
+  threshold_silver: 1.0
+  threshold_copper: 0.7
+  multiplier_gold: 5.0
+  multiplier_silver: 3.0
+  multiplier_copper: 2.0
+  duration_ticks: 20
+  cascade_radius: 10
+  cascade_chance: 0.30
+  cascade_pressure_boost: 0.5
+  predator_attract_delay: 10
+  predator_attract_radius: 8
+  richness_restore_frac: 0.5
+
+colony_cache:
+  enabled: true
+  global_deposit_weight: 0.30
+  colony_inherit_frac: 0.60
+  global_inherit_frac: 0.40
+  dormant_ttl: 500
+  cache_decay_rate: 0.98
 
 auto_balance:
   enabled: true

@@ -470,7 +470,11 @@ function App() {
   // ─── WebSocket ───
   useEffect(() => {
     const connect = () => {
-      const ws = new WebSocket(`ws://${location.hostname}:8000/ws/viewer`);
+      const ws = new WebSocket(
+        location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+          ? `ws://${location.hostname}:8000/ws/viewer`
+          : `wss://api.krab.fund/ws/viewer`
+      );
 
       ws.onopen = () => {
         setConnected(true);

@@ -97,8 +97,8 @@ class MetricsLogger:
         # Short buffer: per-epoch reset for PosDis/BosDis
         self.observations.clear()
         self.social_observations.clear()
-        # Long buffer: rolling window ~20000 for TopSim/MI (≈100 obs/context)
-        max_long = 20000
+        # Long buffer: rolling window ~5000 for TopSim/MI (~5 epochs)
+        max_long = 5000
         if len(self.long_observations) > max_long:
             self.long_observations = self.long_observations[-max_long:]
 

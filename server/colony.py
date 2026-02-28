@@ -1,11 +1,13 @@
 """
 colony.py — ColonyManager: detects and manages persistent lobster clusters.
+ColonyCacheManager: per-colony cultural caches with dormancy.
 Lifecycle: detection → candidacy → formation → dissolution.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -34,9 +36,12 @@ class ColonyManager:
         self._next_id = 1
         # Proto-colonies being tracked: {key: {members, center_x, center_y, first_tick}}
         self._candidates: dict[str, dict] = {}
+        # Dissolution events from last tick: [(colony_id, center_x, center_y)]
+        self._last_dissolved: list[tuple[str, float, float]] = []
 
     def tick(self, lobsters: dict, rifts: list, current_tick: int):
         """Update colonies: detect clusters, promote candidates, dissolve scattered."""
+        self._last_dissolved = []
         # 1. Find current clusters
         clusters = self._detect_clusters(lobsters)
 
@@ -83,6 +88,8 @@ class ColonyManager:
                         colony.center_x = sum(xs) / len(xs)
                         colony.center_y = sum(ys) / len(ys)
         for cid in to_dissolve:
+            colony = self.colonies[cid]
+            self._last_dissolved.append((cid, colony.center_x, colony.center_y))
             print(f"[COLONY] Dissolved colony {cid}")
             del self.colonies[cid]
 
@@ -186,9 +193,6 @@ class ColonyManager:
                         f"with {len(cand['members'])} members"
                     )
                 to_remove.append(key)
-            elif age > self.persistence_ticks * 3:
-                # Stale candidate — remove
-                to_remove.append(key)
         for key in to_remove:
             self._candidates.pop(key, None)
 
@@ -219,3 +223,72 @@ class ColonyManager:
             }
             for c in self.colonies.values()
         ]
+
+
+class ColonyCacheManager:
+    """Manages per-colony cultural caches, independent of Colony lifecycle.
+    Colonies are recreated by DBSCAN each tick, but caches persist.
+    Dissolved colony caches go dormant and can be revived."""
+
+    def __init__(self, config: dict, cache_class: type):
+        cc = config.get("colony_cache", {})
+        self.enabled = cc.get("enabled", False)
+        self.global_deposit_weight = cc.get("global_deposit_weight", 0.30)
+        self.colony_inherit_frac = cc.get("colony_inherit_frac", 0.60)
+        self.global_inherit_frac = cc.get("global_inherit_frac", 0.40)
+        self.dormant_ttl = cc.get("dormant_ttl", 500)
+        self.decay_rate = cc.get("cache_decay_rate", 0.98)
+        self._config = config
+        self._cache_class = cache_class
+
+        # Active colony caches: {colony_id: CulturalCache}
+        self.caches: dict[str, Any] = {}
+        # Dormant caches: {colony_id: (CulturalCache, death_tick, cx, cy)}
+        self.dormant: dict[str, tuple[Any, int, float, float]] = {}
+
+    def get_or_create_cache(self, colony_id: str) -> Any:
+        """Get existing cache for colony_id, revive from dormant, or create new."""
+        if colony_id in self.caches:
+            return self.caches[colony_id]
+        # Check dormant
+        if colony_id in self.dormant:
+            cache, _, _, _ = self.dormant.pop(colony_id)
+            self.caches[colony_id] = cache
+            print(f"[COLONY_CACHE] Revived dormant cache for {colony_id}")
+            return cache
+        # Create new
+        cache = self._cache_class(self._config)
+        self.caches[colony_id] = cache
+        print(f"[COLONY_CACHE] Created new cache for {colony_id}")
+        return cache
+
+    def on_colony_dissolved(self, colony_id: str, cx: float, cy: float, tick: int):
+        """Move active cache to dormant when colony dissolves."""
+        if colony_id in self.caches:
+            cache = self.caches.pop(colony_id)
+            self.dormant[colony_id] = (cache, tick, cx, cy)
+            print(f"[COLONY_CACHE] {colony_id} cache moved to dormant (TTL={self.dormant_ttl})")
+
+    def tick(self, current_tick: int, active_colony_ids: set[str]):
+        """Expire dormant caches past TTL. Remove caches for colonies that no longer exist."""
+        expired = []
+        for cid, (cache, death_tick, cx, cy) in self.dormant.items():
+            if current_tick - death_tick > self.dormant_ttl:
+                expired.append(cid)
+        for cid in expired:
+            self.dormant.pop(cid)
+            print(f"[COLONY_CACHE] Dormant cache {cid} expired")
+
+        # Clean up active caches for colonies that no longer exist and aren't dormant
+        orphaned = [cid for cid in self.caches if cid not in active_colony_ids]
+        for cid in orphaned:
+            # Move to dormant instead of deleting
+            cache = self.caches.pop(cid)
+            self.dormant[cid] = (cache, current_tick, 0.0, 0.0)
+
+    def epoch_decay(self):
+        """Decay all active + dormant caches."""
+        for cache in self.caches.values():
+            cache.epoch_decay()
+        for cache, _, _, _ in self.dormant.values():
+            cache.epoch_decay()

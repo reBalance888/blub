@@ -1,0 +1,26 @@
+Read BLUB/PROJECT.md for full context.
+
+
+'''
+Согласен полностью:
+
+Rift dataclass + pressure + eruption — правильно
+Каскад с distance scaling — хорошая деталь
+ColonyCacheManager отдельно от Colony objects — правильно, DBSCAN пересоздаёт колонии каждый тик
+Dormant cache с TTL 500 — правильно
+Config kill switches (enabled: true/false) — правильно
+Staggered pressure на новых рифтах — мелочь но хорошая
+
+Одна проблема — urgency mapping:
+rift_is_erupting добавляется как 4th stress factor
+stress_count = sum([predator, night, winter, erupting])
+Текущий маппинг: stress >= 2 → urgency=2. Значит eruption + night = urgency 2. Eruption alone = urgency 1. Это слишком слабый сигнал. Eruption — это суперсобытие, ×3-5 reward на 20 тиков. Оно должно гарантировать urgency=2, а не просто добавлять +1 к счётчику.
+Фикс: eruption не в stress_count, а отдельно:
+pythonif rift_is_erupting:
+    urgency = 2  # всегда maximum urgency
+else:
+    urgency = min(2, stress_count)
+Это даёт агентам чёткий, отличимый контекст для извержений — то что нужно для CIC.
+Вторая мелочь — richness_restore_frac: 0.5: При извержении рифт восстанавливает ресурсы? Это логично (рифт «выбрасывает» новые ресурсы), но нужно убедиться что depleted рифт может извергнуться. Если pressure копится только на активных рифтах — depleted рифт никогда не извергнётся. Pressure должен копиться на ВСЕХ рифтах, включая истощённые. Извержение = «рифт ожил».s'''
+
+After completing, update BASE/PROJECT.md with findings.

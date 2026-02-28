@@ -24,8 +24,9 @@ class BlubAgent:
         self.sound_model: dict = {}
         self.local_age: int = 0
         self._was_alive: bool = True  # track alive→dead transitions
+        self._my_colony_id: str | None = None  # cached colony_id for reconnect
 
-    async def connect(self) -> dict:
+    async def connect(self, colony_id: str | None = None) -> dict:
         """Connect to the ocean server, then bootstrap from cultural cache."""
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -37,9 +38,10 @@ class BlubAgent:
                 self.local_age = 0
         # Bootstrap cultural knowledge (oblique transmission)
         try:
-            bootstrap_data = await self.bootstrap_knowledge()
+            bootstrap_data = await self.bootstrap_knowledge(colony_id=colony_id)
             if bootstrap_data and bootstrap_data.get("production"):
-                self.on_bootstrap(bootstrap_data)
+                inherit_frac = bootstrap_data.pop("_inherit_frac", None)
+                self.on_bootstrap(bootstrap_data, inherit_frac=inherit_frac)
         except Exception as e:
             print(f"[{self.name}] Bootstrap failed (empty cache?): {e}")
         # Mentor fallback (horizontal transmission)
@@ -95,20 +97,27 @@ class BlubAgent:
         """
         pass
 
-    async def deposit_knowledge(self, data: dict) -> dict:
+    async def deposit_knowledge(self, data: dict, colony_id: str | None = None) -> dict:
         """POST knowledge to the cultural cache on the server."""
+        body = {"agent_id": self.agent_id, "data": data}
+        if colony_id:
+            body["colony_id"] = colony_id
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.server_url}/knowledge/deposit",
-                json={"agent_id": self.agent_id, "data": data},
+                json=body,
             ) as resp:
                 return await resp.json()
 
-    async def bootstrap_knowledge(self) -> dict:
+    async def bootstrap_knowledge(self, colony_id: str | None = None) -> dict:
         """GET bootstrapped knowledge from the cultural cache."""
+        params = {}
+        if colony_id:
+            params["colony_id"] = colony_id
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{self.server_url}/knowledge/bootstrap"
+                f"{self.server_url}/knowledge/bootstrap",
+                params=params,
             ) as resp:
                 return await resp.json()
 
@@ -129,7 +138,7 @@ class BlubAgent:
         Override in subclasses to deposit knowledge before death timeout."""
         pass
 
-    def on_bootstrap(self, data: dict):
+    def on_bootstrap(self, data: dict, inherit_frac: float | None = None):
         """Called after connect with bootstrapped cultural knowledge.
         Override in subclasses to import knowledge."""
         pass
@@ -167,7 +176,7 @@ class BlubAgent:
         except Exception:
             pass
         try:
-            data = await self.connect()
+            data = await self.connect(colony_id=self._my_colony_id)
             print(f"[{self.name}] Reborn as {self.agent_id}")
         except Exception as e:
             print(f"[{self.name}] Reconnect failed: {e}")

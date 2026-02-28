@@ -15,7 +15,7 @@ from .epoch import EpochManager
 from .metrics import MetricsLogger
 from .cultural_cache import CulturalCache
 from .pheromone import PheromoneMap
-from .colony import ColonyManager
+from .colony import ColonyManager, ColonyCacheManager
 from .tidal import TidalEngine
 
 
@@ -84,8 +84,11 @@ class Ocean:
         self.cultural_cache = CulturalCache(config)
         self.pheromone_map = PheromoneMap(config)
         self.colony_mgr = ColonyManager(config)
+        self.colony_cache_mgr = ColonyCacheManager(config, CulturalCache)
         self.tidal = TidalEngine(config.get("tidal", {}))
         self.global_tick: int = 0  # never resets between epochs
+        self._eruption_count: int = 0  # eruptions this epoch (for metrics)
+        self._eruption_events: list[dict] = []  # current tick events (for viewer)
 
         # Tidal epoch accumulators (reset each epoch)
         self._tidal_predators_spawned_day: int = 0
@@ -254,18 +257,26 @@ class Ocean:
             target = 0 if has_trail else 1
 
         # Feature 3: URGENCY
-        has_close_predator = any(p["distance"] <= 3 for p in nearby_preds)
-        tidal_state = self.tidal.get_state_for_agent()
-        is_night = tidal_state.get("is_night", False)
-        is_winter = tidal_state.get("seasonal_multiplier", 1.0) < 0.7
-
-        stress_count = sum([has_close_predator, is_night, is_winter])
-        if stress_count >= 2:
-            urgency = 2  # high
-        elif stress_count == 1:
-            urgency = 1  # medium
+        # Eruption override: always max urgency when erupting rift is visible
+        rift_is_erupting = any(
+            r.erupting for r in self.rift_mgr.active_rifts
+            if abs(r.x - lob.x) <= vision and abs(r.y - lob.y) <= vision
+        )
+        if rift_is_erupting:
+            urgency = 2  # always maximum urgency for eruptions
         else:
-            urgency = 0  # low
+            has_close_predator = any(p["distance"] <= 3 for p in nearby_preds)
+            tidal_state = self.tidal.get_state_for_agent()
+            is_night = tidal_state.get("is_night", False)
+            is_winter = tidal_state.get("seasonal_multiplier", 1.0) < 0.7
+
+            stress_count = sum([has_close_predator, is_night, is_winter])
+            if stress_count >= 2:
+                urgency = 2  # high
+            elif stress_count == 1:
+                urgency = 1  # medium
+            else:
+                urgency = 0  # low
 
         return (situation, target, urgency)
 
@@ -338,6 +349,31 @@ class Ocean:
 
         # 2. Process sounds (before rift rewards so we know who spoke)
         self._process_sounds()
+
+        # 2b. Eruption processing (before rift rewards so multiplier applies)
+        self._eruption_events = []
+        ecfg = self.config.get("eruptions", {})
+        if ecfg.get("enabled", False):
+            lobster_positions = self._get_lobster_positions()
+            eruption_events = self.rift_mgr.tick_eruptions(self.tick, lobster_positions)
+            self._eruption_events = eruption_events
+            # Count new eruptions for metrics
+            for ev in eruption_events:
+                if ev["phase"] == "start":
+                    self._eruption_count += 1
+            # Spawn predators at erupting rifts past delay
+            delay = ecfg.get("predator_attract_delay", 10)
+            attract_radius = ecfg.get("predator_attract_radius", 8)
+            for rift in self.rift_mgr.get_erupting_needing_predator(delay):
+                # Spawn a shark near the erupting rift
+                offset_x = random.randint(-attract_radius, attract_radius)
+                offset_y = random.randint(-attract_radius, attract_radius)
+                pred = self.predator_mgr.spawn_at(
+                    "shark", rift.x + offset_x, rift.y + offset_y, self.size
+                )
+                rift.eruption_predator_spawned = True
+                if pred:
+                    print(f"[ERUPTION] Predator {pred.id} attracted to erupting {rift.id} at ({rift.x},{rift.y})")
 
         # 3. Rift rewards (group bonus)
         self._process_rift_rewards()
@@ -444,6 +480,13 @@ class Ocean:
         rift_positions = [(r.x, r.y, r.id) for r in self.rift_mgr.active_rifts]
         self.colony_mgr.tick(self.lobsters, rift_positions, self.tick)
 
+        # 7c2. Colony cache: forward dissolutions, tick dormant TTL
+        if self.colony_cache_mgr.enabled:
+            for cid, cx, cy in self.colony_mgr._last_dissolved:
+                self.colony_cache_mgr.on_colony_dissolved(cid, cx, cy, self.tick)
+            active_ids = set(self.colony_mgr.colonies.keys())
+            self.colony_cache_mgr.tick(self.tick, active_ids)
+
         # 7d. Colony scent deposits: members deposit at position + 4 cardinal neighbors
         cs_deposit = self.config.get("pheromones", {}).get("colony_scent_deposit", 0.5)
         cs_neighbor = self.config.get("pheromones", {}).get("colony_scent_neighbor_deposit", 0.2)
@@ -521,6 +564,7 @@ class Ocean:
                 # Phase 2 metrics
                 bottleneck_retirements=self._bottleneck_retirements,
                 task_stimuli=list(self._current_stimuli),
+                eruption_count=self._eruption_count,
             )
             # Reset tidal accumulators
             self._tidal_predators_spawned_day = 0
@@ -533,6 +577,19 @@ class Ocean:
             self._pheromone_clear_events = 0
             # Reset bottleneck accumulator
             self._bottleneck_retirements = 0
+            # Reset eruption counter (was previously in _end_epoch — too early)
+            self._eruption_count = 0
+            # Reset CSR/PCA/CIC counters (were never reset — metrics were cumulative!)
+            self._csr_heard_events = 0
+            self._csr_successes = 0
+            self._csr_social_heard = 0
+            self._csr_social_successes = 0
+            self._pca_events = 0
+            self._pca_successes = 0
+            self._cic_heard_events = 0
+            self._cic_heard_moved = 0
+            self._cic_silent_events = 0
+            self._cic_silent_moved = 0
 
     def _process_movements(self):
         directions = {
@@ -615,6 +672,9 @@ class Ocean:
                 continue
             n = len(nearby)
             reward = self.rift_mgr.calc_group_reward(n) * seasonal_mult
+            # Apply eruption multiplier
+            if rift.erupting:
+                reward *= rift.eruption_multiplier
             # Per-type depletion: scale drain by rift type's depletion_rate / base 0.02
             depletion_rate = self.rift_mgr.depletion_rate_for_type(rift.rift_type)
             drain_multiplier = depletion_rate / 0.02
@@ -825,8 +885,12 @@ class Ocean:
             "types": epoch_summary,
         })
 
-        # Decay cultural cache
+        # Decay cultural cache (global + colony caches)
         self.cultural_cache.epoch_decay()
+        if self.colony_cache_mgr.enabled:
+            self.colony_cache_mgr.epoch_decay()
+
+        # Note: eruption_count reset moved to after metrics logging (tick % 100 block)
 
     # ----- Phase 2: Cultural Transmission Bottleneck -----
 
@@ -1276,6 +1340,8 @@ class Ocean:
                     "richness_pct": round(pct, 2),
                     "relative": [dx, dy],
                     "rift_type": rift.rift_type,
+                    "erupting": rift.erupting,
+                    "eruption_multiplier": rift.eruption_multiplier if rift.erupting else 1.0,
                 })
 
         # Nearby predators
@@ -1402,6 +1468,9 @@ class Ocean:
                 "pos": [rift.x, rift.y],
                 "richness_pct": round(pct, 2),
                 "rift_type": rift.rift_type,
+                "erupting": rift.erupting,
+                "eruption_mult": rift.eruption_multiplier if rift.erupting else 1.0,
+                "pressure": round(rift.pressure, 3),
             })
 
         predators = []
@@ -1443,6 +1512,7 @@ class Ocean:
             "colonies": self.colony_mgr.get_viewer_data(),
             "tidal": self.tidal.get_viewer_data(),
             "emergent_dictionary": self._build_emergent_dictionary(),
+            "eruption_events": self._eruption_events,
             "epoch_history": self.epoch_history,
             "metrics": self.latest_metrics,
             "stats": {
@@ -1504,8 +1574,11 @@ class Ocean:
         self._cic_speaker_pending.clear()
         # Note: _speaker_influence NOT cleared — uses sliding window decay across epochs
         self.cultural_cache = CulturalCache(self.config)
+        self.colony_cache_mgr = ColonyCacheManager(self.config, CulturalCache)
         self.pheromone_map = PheromoneMap(self.config)
         self.colony_mgr = ColonyManager(self.config)
+        self._eruption_count = 0
+        self._eruption_events = []
         self._recalculate_active_zone()
         zone_min, zone_max = self._active_zone_bounds()
         self.rift_mgr.spawn_epoch_rifts(self.epoch_mgr.epoch, zone_min, self.active_zone_size)

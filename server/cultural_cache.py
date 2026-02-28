@@ -40,11 +40,12 @@ class CulturalCache:
         # Per-agent knowledge snapshots for mentor system
         self.agent_snapshots: dict[str, dict] = {}
 
-    def contribute(self, data: dict, agent_id: str | None = None):
+    def contribute(self, data: dict, agent_id: str | None = None, weight: float = 1.0):
         """Accept a knowledge deposit from an agent.
 
         Handles both Roth-Erev format {ctx_str: [weights]} and
         Neural format {"W": [...], "baseline": [...]}.
+        Weight parameter: higher-earning agents have more influence on cache (Darwinian selection).
         """
         # Store snapshot for mentor system
         if agent_id:
@@ -54,7 +55,7 @@ class CulturalCache:
 
         # Neural production format: {"W": [...], "baseline": [...]}
         if "W" in prod:
-            self._contribute_neural(prod)
+            self._contribute_neural(prod, weight=weight)
         else:
             # Roth-Erev format: {ctx_key_str: [weights...]}
             for ctx_str, weights in prod.items():
@@ -84,8 +85,9 @@ class CulturalCache:
                     self.comprehension_counts[sidx].get(ctx_str, 0) + count
                 )
 
-    def _contribute_neural(self, prod: dict):
-        """Incremental mean of neural W matrices.
+    def _contribute_neural(self, prod: dict, weight: float = 1.0):
+        """Weighted incremental mean of neural W matrices.
+        Higher-earning agents contribute more to the cache (Darwinian cultural selection).
         Handles both flat (Gaussian: W[pos]=[floats]) and nested (Neural: W[pos]=[[floats]]) formats."""
         W = prod.get("W", [])
         baseline = prod.get("baseline", [])
@@ -93,24 +95,23 @@ class CulturalCache:
         if key not in self._prod_n:
             self._neural_W = deepcopy(W)
             self._neural_baseline = list(baseline)
-            self._prod_n[key] = 1
+            self._prod_n[key] = weight
         else:
-            n = self._prod_n[key] + 1
-            self._prod_n[key] = n
+            total_w = self._prod_n[key] + weight
+            alpha = weight / total_w  # higher earnings → more pull
+            self._prod_n[key] = total_w
             for pos in range(min(len(W), len(self._neural_W))):
                 pw = W[pos]
                 sw = self._neural_W[pos]
                 if isinstance(pw, list) and pw and isinstance(pw[0], (int, float)):
-                    # Flat format: W[pos] = [w0, w1, w2, bias]
                     for j in range(min(len(pw), len(sw))):
-                        sw[j] += (pw[j] - sw[j]) / n
+                        sw[j] += (pw[j] - sw[j]) * alpha
                 elif isinstance(pw, list) and pw and isinstance(pw[0], list):
-                    # Nested format: W[pos] = [[w00, w01, ...], [w10, ...], ...]
                     for i in range(min(len(pw), len(sw))):
                         for j in range(min(len(pw[i]), len(sw[i]))):
-                            sw[i][j] += (pw[i][j] - sw[i][j]) / n
+                            sw[i][j] += (pw[i][j] - sw[i][j]) * alpha
             for i in range(min(len(baseline), len(self._neural_baseline))):
-                self._neural_baseline[i] += (baseline[i] - self._neural_baseline[i]) / n
+                self._neural_baseline[i] += (baseline[i] - self._neural_baseline[i]) * alpha
 
     def bootstrap(self) -> dict:
         """Return cached knowledge with Gaussian noise for a new agent.

@@ -187,6 +187,7 @@ class GaussianProductionPolicy:
         self.lr = lr
         lang = language_cfg or {}
         self.sigma_start = lang.get("sigma_start", 1.0)
+        self.sigma_newborn = lang.get("sigma_newborn", self.sigma_start)
         self.sigma = self.sigma_start
         self.sigma_min = lang.get("sigma_min", 0.5)
         self.sigma_anneal = lang.get("sigma_anneal_per_epoch", 0.02)
@@ -195,17 +196,11 @@ class GaussianProductionPolicy:
         self._recent_messages: list[tuple] = []
         self._entropy_bonus_coeff: float = lang.get("entropy_bonus_coeff", 1.0)
         self._entropy_min_threshold: float = lang.get("entropy_min_threshold", 1.0)
-        # Structured init: W @ normalized_ctx → sigmoid → [0,1] → sound index.
-        # Position 0: high spatial → HIGH sounds (positive gradient)
-        # Position 1: high social → LOW sounds (flipped gradient)
-        # This creates position-specific encoding → high PosDis + high TopSim.
+        # Centered init: no structural bias. mu=0.5 for all contexts initially.
+        # Learning will differentiate positions through the reward signal.
         self.W: list[list[float]] = []
         for pos in range(max_len):
-            if pos == 0:
-                self.W.append([1.5, 0.5, 0.3, 0.0])
-            else:
-                # Flipped gradient: high values → low sounds, centered by bias=1.0
-                self.W.append([-1.5, -0.5, -0.3, 1.0])
+            self.W.append([0.0, 0.0, 0.0, 0.0])
         self.baseline: list[float] = [0.0] * max_len
 
     def split_context(self, full_ctx: tuple) -> list[tuple]:
@@ -277,14 +272,19 @@ class GaussianProductionPolicy:
         Gradient: push μ toward chosen sound if advantage > 0.
         Entropy regularization: gentle bonus/penalty to prevent message collapse."""
         # Entropy adjustment (shared across positions)
+        # Only BONUS when entropy is high (diverse vocab). NO penalty when low —
+        # penalty created constant -0.3 drag when vocab=0, preventing recovery.
         h = self._message_entropy()
-        entropy_adj = self._entropy_bonus_coeff * (h - self._entropy_min_threshold)
-        entropy_adj = max(-1.0, min(1.0, entropy_adj))  # cap at +/-1.0
+        if h >= self._entropy_min_threshold:
+            entropy_adj = self._entropy_bonus_coeff * (h - self._entropy_min_threshold)
+            entropy_adj = min(0.3, entropy_adj)
+        else:
+            entropy_adj = 0.0
 
         sub_ctxs = self.split_context(full_ctx)
         for pos in range(min(len(message), self.max_len)):
             reward = rewards[pos] if pos < len(rewards) else rewards[-1]
-            self.baseline[pos] += 0.01 * (reward - self.baseline[pos])
+            self.baseline[pos] += 0.05 * (reward - self.baseline[pos])
             advantage = reward - self.baseline[pos] + entropy_adj
             if abs(advantage) < 0.01:
                 continue
@@ -589,7 +589,7 @@ class SocialAgent(BlubAgent):
         n_comp = sum(len(v) if isinstance(v, dict) else 1 for v in comp.values())
         print(f"[{self.name}] Imported knowledge: {n_w} weights, {n_comp} comp entries (frac={frac})")
 
-    def partial_reset(self, retention: float = 0.20):
+    def partial_reset(self, retention: float = 0.50):
         """Partial reset: shrink weights toward zero, keep direction."""
         for pos in range(self.production.max_len):
             w = self.production.W[pos]
@@ -612,14 +612,15 @@ class SocialAgent(BlubAgent):
         self.ctx_discoverer.count = 0
         self.last_credits = 0.0
         self.decay_counter = 0
-        # Reset sigma to allow exploration in new life
+        # Reset sigma: newborns start quieter (language exists in cache)
         old_sigma = self.production.sigma
-        self.production.sigma = self.production.sigma_start
+        self.production.sigma = self.production.sigma_newborn
         print(f"[{self.name}] Partial reset (retention={retention}, sigma {old_sigma:.3f}->{self.production.sigma:.3f})")
 
-    def on_bootstrap(self, data: dict):
+    def on_bootstrap(self, data: dict, inherit_frac: float | None = None):
         """Called by base_agent after connect — import cultural cache (oblique transmission)."""
-        self.import_knowledge(data, frac=self.ablation.get("inheritance_frac", 0.40))
+        frac = inherit_frac if inherit_frac is not None else self.ablation.get("inheritance_frac", 0.40)
+        self.import_knowledge(data, frac=frac)
 
     def on_mentor(self, data: dict):
         """Horizontal transmission: blend 15% from nearest experienced social agent."""
@@ -629,7 +630,7 @@ class SocialAgent(BlubAgent):
         """Deposit knowledge to cultural cache when killed by predator."""
         try:
             knowledge = self.export_knowledge()
-            result = await self.deposit_knowledge(knowledge)
+            result = await self.deposit_knowledge(knowledge, colony_id=self._my_colony_id)
             print(f"[{self.name}] Death deposit: {result.get('message', 'ok')}")
         except Exception as e:
             print(f"[{self.name}] Death deposit failed: {e}")
@@ -638,11 +639,11 @@ class SocialAgent(BlubAgent):
         """Deposit knowledge before retirement, then partial reset."""
         try:
             knowledge = self.export_knowledge()
-            result = await self.deposit_knowledge(knowledge)
+            result = await self.deposit_knowledge(knowledge, colony_id=self._my_colony_id)
             print(f"[{self.name}] Pre-retire deposit: {result.get('message', 'ok')}")
         except Exception as e:
             print(f"[{self.name}] Pre-retire deposit failed: {e}")
-        self.partial_reset(retention=0.20)
+        self.partial_reset(retention=0.50)
 
     async def periodic_check(self, state: dict):
         """Every contribution_interval ticks, deposit knowledge if old enough."""
@@ -651,7 +652,7 @@ class SocialAgent(BlubAgent):
         if self.local_age > 0 and self.local_age % interval == 0 and self.local_age >= min_age:
             try:
                 knowledge = self.export_knowledge()
-                result = await self.deposit_knowledge(knowledge)
+                result = await self.deposit_knowledge(knowledge, colony_id=self._my_colony_id)
                 print(f"[{self.name}] Periodic deposit at local_age={self.local_age}: {result.get('message', 'ok')}")
             except Exception as e:
                 print(f"[{self.name}] Periodic deposit failed: {e}")
@@ -704,6 +705,9 @@ class SocialAgent(BlubAgent):
         return (sit_scaled, urg_scaled, 0, tgt_scaled, 0, 0)
 
     def think(self, state: dict) -> dict:
+        # Cache colony_id for deposit/bootstrap calls
+        self._my_colony_id = state.get("my_colony_id")
+
         # Extract context — factored mode or legacy
         fc = state.get("factored_context")
         if fc is not None and self._context_mode == "factored":
@@ -721,7 +725,9 @@ class SocialAgent(BlubAgent):
             self._current_task = selected
 
         # Differential reinforcement: pos0=spatial (credit delta), pos1=social (group/survival)
-        current_credits = state.get("my_net_credits", 0)
+        # Use earned-only credits (NOT net) to avoid sound cost poisoning the reward signal.
+        # Sound cost created -4.5 delta per speech act, teaching agents to shut up.
+        current_credits = state.get("my_credits", 0)
         delta = current_credits - self.last_credits
 
         current_group = state.get("group_hits", 0)
@@ -729,7 +735,10 @@ class SocialAgent(BlubAgent):
         group_delta = current_group - self.last_group_hits
         survived_predator = len(state.get("nearby_predators", [])) > 0 and state.get("alive", True)
 
-        if self.last_sound_seq:
+        # Guard: skip reinforce at epoch boundary (counters reset → huge negative spike)
+        epoch_reset = delta < -10 and current_credits < 1.0
+
+        if self.last_sound_seq and not epoch_reset:
             # pos0: spatial reward from rift credits (allow negative = sound cost penalty)
             pos0_reward = delta
             # pos1: social reward from group coordination + predator survival
@@ -784,6 +793,13 @@ class SocialAgent(BlubAgent):
         self.decay_counter += 1
         if self.decay_counter >= 50:
             self.production.decay_all()
+            # Decay comprehension counts — forget stale conventions
+            for sidx in self.comprehension.counts:
+                for ctx_key in self.comprehension.counts[sidx]:
+                    self.comprehension.counts[sidx][ctx_key] *= 0.95
+            for sseq in self.comprehension.seq_counts:
+                for ctx_key in self.comprehension.seq_counts[sseq]:
+                    self.comprehension.seq_counts[sseq][ctx_key] *= 0.95
             self.decay_counter = 0
 
         # Log every 100 ticks
@@ -796,12 +812,10 @@ class SocialAgent(BlubAgent):
         speak: list[str] = []
 
         # Produce sounds based on current context
-        # Always speak near rifts/predators, 10% elsewhere (was 30% — too much noise)
         # TEACH task: speak more frequently (20% baseline)
         near_rift = bool(state.get("nearby_rifts"))
         near_predator = bool(state.get("nearby_predators"))
         base_speak_rate = 0.20 if self._current_task == 3 else 0.10
-
         if near_rift or near_predator or random.random() < base_speak_rate:
             # Compositional production: always 2-sound message
             sound_indices = self.production.produce(ctx_key)

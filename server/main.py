@@ -186,13 +186,31 @@ async def knowledge_deposit(body: dict):
     if lob.age < min_age:
         return JSONResponse({"error": f"agent too young (age={lob.age}, need {min_age})"}, status_code=400)
     data = body.get("data", {})
-    ocean.cultural_cache.contribute(data, agent_id=agent_id)
+    colony_id = body.get("colony_id")
+    weight = max(1.0, lob.balance)
+
+    if colony_id and ocean.colony_cache_mgr.enabled:
+        # Colony agent: full weight to colony cache + partial to global
+        colony_cache = ocean.colony_cache_mgr.get_or_create_cache(colony_id)
+        colony_cache.contribute(data, agent_id=agent_id, weight=weight)
+        global_weight = ocean.colony_cache_mgr.global_deposit_weight
+        ocean.cultural_cache.contribute(data, agent_id=agent_id, weight=weight * global_weight)
+    else:
+        # Non-colony agent: full weight to global
+        ocean.cultural_cache.contribute(data, agent_id=agent_id, weight=weight)
     return {"ok": True, "message": "deposit OK"}
 
 
 @app.get("/knowledge/bootstrap")
-async def knowledge_bootstrap():
-    return ocean.cultural_cache.bootstrap()
+async def knowledge_bootstrap(colony_id: str = ""):
+    if colony_id and ocean.colony_cache_mgr.enabled and colony_id in ocean.colony_cache_mgr.caches:
+        colony_cache = ocean.colony_cache_mgr.caches[colony_id]
+        data = colony_cache.bootstrap()
+        data["_inherit_frac"] = ocean.colony_cache_mgr.colony_inherit_frac
+        return data
+    data = ocean.cultural_cache.bootstrap()
+    data["_inherit_frac"] = ocean.colony_cache_mgr.global_inherit_frac if ocean.colony_cache_mgr.enabled else None
+    return data
 
 
 @app.get("/knowledge/mentor")
